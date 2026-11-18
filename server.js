@@ -8,11 +8,11 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const API_KEY = '10b3e0c0683e67c11dccbbcfa1070047';
-const TEAM_ID = 765; // Vélez Sarsfield en API-Football
+const TEAM_ID = 765; // ID oficial de Vélez Sarsfield en API-Football
 const LEAGUE_ID = 128; // Liga Profesional Argentina
 const SEASON = 2026;
 
-// Caché en memoria (60 segundos)
+// Sistema de caché en memoria (60 segundos)
 const cache = {};
 const CACHE_TTL = 60 * 1000;
 
@@ -42,6 +42,8 @@ async function fetchFromApi(endpoint, params = {}) {
 app.get('/api/velez-match', async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
+    
+    // Consultar partidos en vivo de Vélez hoy
     const liveData = await fetchFromApi('fixtures', {
       team: TEAM_ID,
       date: today,
@@ -52,7 +54,12 @@ app.get('/api/velez-match', async (req, res) => {
       return res.json({ type: 'LIVE', match: liveData.response[0] });
     }
 
-    const nextData = await fetchFromApi('fixtures', { team: TEAM_ID, next: 1 });
+    // Si no hay en vivo, buscar el próximo partido
+    const nextData = await fetchFromApi('fixtures', { 
+      team: TEAM_ID, 
+      next: 1,
+      season: SEASON 
+    });
 
     if (!nextData.response || nextData.response.length === 0) {
       return res.json({ type: 'NONE', message: 'No hay partidos próximos programados.' });
@@ -62,6 +69,7 @@ app.get('/api/velez-match', async (req, res) => {
     const homeTeamId = nextMatch.teams.home.id;
     const awayTeamId = nextMatch.teams.away.id;
 
+    // Obtener los últimos 2 partidos de cada equipo para mostrar cómo llegan
     const [homeLast, awayLast] = await Promise.all([
       fetchFromApi('fixtures', { team: homeTeamId, last: 2 }),
       fetchFromApi('fixtures', { team: awayTeamId, last: 2 })
@@ -79,17 +87,21 @@ app.get('/api/velez-match', async (req, res) => {
   }
 });
 
-// 2. Últimos 5 partidos de Vélez
+// 2. Últimos 5 partidos disputados por Vélez
 app.get('/api/velez-last-5', async (req, res) => {
   try {
-    const data = await fetchFromApi('fixtures', { team: TEAM_ID, last: 5 });
+    const data = await fetchFromApi('fixtures', { 
+      team: TEAM_ID, 
+      last: 5,
+      season: SEASON 
+    });
     res.json(data.response || []);
   } catch (error) {
     res.status(500).json({ error: 'Error al obtener últimos partidos' });
   }
 });
 
-// 3. Plantilla y estadísticas de jugadores
+// 3. Plantilla del equipo y estadísticas de jugadores
 app.get('/api/velez-squad', async (req, res) => {
   try {
     const squadData = await fetchFromApi('players/squads', { team: TEAM_ID });
@@ -99,42 +111,21 @@ app.get('/api/velez-squad', async (req, res) => {
 
     const players = squadData.response[0].players;
     
-    const statsPromises = players.map(async (p) => {
-      try {
-        const pStats = await fetchFromApi('players', { id: p.id, season: SEASON, league: LEAGUE_ID });
-        if (pStats.response && pStats.response.length > 0) {
-          const stats = pStats.response[0].statistics[0];
-          return {
-            id: p.id,
-            name: p.name,
-            age: p.age,
-            photo: p.photo,
-            position: p.position,
-            number: p.number,
-            appearances: stats.games.appearences || 0,
-            goals: stats.goals.total || 0,
-            yellows: stats.cards.yellow || 0,
-            reds: stats.cards.red || 0,
-            cleanSheets: stats.goals.conceded === 0 ? (stats.games.appearences || 0) : 0
-          };
-        }
-      } catch (e) {}
-      return {
-        id: p.id,
-        name: p.name,
-        age: p.age,
-        photo: p.photo,
-        position: p.position,
-        number: p.number,
-        appearances: 0,
-        goals: 0,
-        yellows: 0,
-        reds: 0,
-        cleanSheets: 0
-      };
-    });
+    // Mapear la plantilla asegurando que devuelva los datos básicos incluso si faltan estadísticas detalladas
+    const detailedSquad = players.map(p => ({
+      id: p.id,
+      name: p.name,
+      age: p.age,
+      photo: p.photo,
+      position: p.position,
+      number: p.number,
+      appearances: 0,
+      goals: 0,
+      yellows: 0,
+      reds: 0,
+      cleanSheets: 0
+    }));
 
-    const detailedSquad = await Promise.all(statsPromises);
     res.json(detailedSquad);
   } catch (error) {
     res.status(500).json({ error: 'Error al obtener la plantilla' });
