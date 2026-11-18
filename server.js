@@ -38,100 +38,45 @@ async function fetchFromApi(endpoint, params = {}) {
   }
 }
 
-// 1. Partido en vivo o Próximo partido
-app.get('/api/velez-match', async (req, res) => {
+// Endpoint unificado que devuelve todos los datos en vivo para tu frontend
+app.get('/api/velez-data', async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
-    
-    // Consultar partidos en vivo de Vélez hoy
+
+    // 1. Consultar partido en vivo hoy o próximo partido
     const liveData = await fetchFromApi('fixtures', {
       team: TEAM_ID,
       date: today,
       status: '1H,HT,2H,ET,P,LIVE'
     });
 
+    let currentMatch = null;
     if (liveData.response && liveData.response.length > 0) {
-      return res.json({ type: 'LIVE', match: liveData.response[0] });
+      currentMatch = { type: 'LIVE', match: liveData.response[0] };
+    } else {
+      const nextData = await fetchFromApi('fixtures', { team: TEAM_ID, next: 1, season: SEASON });
+      if (nextData.response && nextData.response.length > 0) {
+        currentMatch = { type: 'NEXT', match: nextData.response[0] };
+      }
     }
 
-    // Si no hay en vivo, buscar el próximo partido
-    const nextData = await fetchFromApi('fixtures', { 
-      team: TEAM_ID, 
-      next: 1,
-      season: SEASON 
-    });
+    // 2. Últimos partidos de Vélez
+    const lastFixtures = await fetchFromApi('fixtures', { team: TEAM_ID, last: 5, season: SEASON });
 
-    if (!nextData.response || nextData.response.length === 0) {
-      return res.json({ type: 'NONE', message: 'No hay partidos próximos programados.' });
-    }
-
-    const nextMatch = nextData.response[0];
-    const homeTeamId = nextMatch.teams.home.id;
-    const awayTeamId = nextMatch.teams.away.id;
-
-    // Obtener los últimos 2 partidos de cada equipo para mostrar cómo llegan
-    const [homeLast, awayLast] = await Promise.all([
-      fetchFromApi('fixtures', { team: homeTeamId, last: 2 }),
-      fetchFromApi('fixtures', { team: awayTeamId, last: 2 })
-    ]);
-
-    res.json({
-      type: 'NEXT',
-      match: nextMatch,
-      homeForm: homeLast.response || [],
-      awayForm: awayLast.response || []
-    });
-
-  } catch (error) {
-    res.status(500).json({ error: 'Error al obtener información del partido' });
-  }
-});
-
-// 2. Últimos 5 partidos disputados por Vélez
-app.get('/api/velez-last-5', async (req, res) => {
-  try {
-    const data = await fetchFromApi('fixtures', { 
-      team: TEAM_ID, 
-      last: 5,
-      season: SEASON 
-    });
-    res.json(data.response || []);
-  } catch (error) {
-    res.status(500).json({ error: 'Error al obtener últimos partidos' });
-  }
-});
-
-// 3. Plantilla del equipo y estadísticas de jugadores
-app.get('/api/velez-squad', async (req, res) => {
-  try {
+    // 3. Plantilla de jugadores de Vélez
     const squadData = await fetchFromApi('players/squads', { team: TEAM_ID });
-    if (!squadData.response || squadData.response.length === 0) {
-      return res.json([]);
-    }
-
-    const players = squadData.response[0].players;
     
-    // Mapear la plantilla asegurando que devuelva los datos básicos incluso si faltan estadísticas detalladas
-    const detailedSquad = players.map(p => ({
-      id: p.id,
-      name: p.name,
-      age: p.age,
-      photo: p.photo,
-      position: p.position,
-      number: p.number,
-      appearances: 0,
-      goals: 0,
-      yellows: 0,
-      reds: 0,
-      cleanSheets: 0
-    }));
+    res.json({
+      currentMatch,
+      lastMatches: lastFixtures.response || [],
+      squad: squadData.response ? squadData.response[0].players : []
+    });
 
-    res.json(detailedSquad);
   } catch (error) {
-    res.status(500).json({ error: 'Error al obtener la plantilla' });
+    res.status(500).json({ error: 'Error al sincronizar con API-Football' });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor backend corriendo en puerto ${PORT}`);
+  console.log(`Backend corriendo en puerto ${PORT}`);
 });
