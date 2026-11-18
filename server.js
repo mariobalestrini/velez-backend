@@ -16,19 +16,64 @@ let cacheData = null;
 let cacheTime = 0;
 const CACHE_TTL = 60 * 1000;
 
+// Normalizar texto sin tildes para cruzar nombres con la web oficial de Vélez
+function normalizeStr(str) {
+  return (str || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9 ]/g, '')
+    .trim();
+}
+
 function mapPosition(posAbbr, posName) {
   const abbr = (posAbbr || '').toUpperCase();
   const name = (posName || '').toLowerCase();
   if (abbr === 'G' || abbr === 'GK' || name.includes('arquero') || name.includes('goalkeeper')) {
     return { group: 'ARQ', posLabel: 'Arquero' };
   }
-  if (abbr === 'D' || abbr === 'DF' || name.includes('defensor') || name.includes('defender')) {
+  if (abbr === 'D' || abbr === 'DF' || name.includes('defensor') || name.includes('defender') || name.includes('lateral')) {
     return { group: 'DEF', posLabel: 'Defensor' };
   }
   if (abbr === 'F' || abbr === 'FW' || abbr === 'A' || name.includes('delantero') || name.includes('atacante') || name.includes('forward')) {
     return { group: 'DEL', posLabel: 'Delantero' };
   }
   return { group: 'MED', posLabel: 'Mediocampista' };
+}
+
+// Extraer dorsales desde el sitio oficial de Vélez Sarsfield
+async function fetchOfficialVelezJerseys() {
+  const jerseyByLastName = {};
+  try {
+    const { data: html } = await axios.get('https://velez.com.ar/futbol/plantel', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      timeout: 5000
+    });
+    // Busca bloques de número y nombre en el HTML oficial de Vélez
+    const regex = /(?:#|N°|num[^>]*>|number[^>]*>|dorsal[^>]*>)\s*(\d{1,2})\s*<[\s\S]{1,350}?([A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)+)/gi;
+    let match;
+    while ((match = regex.exec(html)) !== null) {
+      const num = parseInt(match[1], 10);
+      const fullName = normalizeStr(match[2]);
+      const parts = fullName.split(' ');
+      const lastName = parts[parts.length - 1];
+      if (num > 0 && lastName.length > 2) {
+        jerseyByLastName[lastName] = num;
+        jerseyByLastName[fullName] = num;
+      }
+    }
+  } catch (err) {
+    console.warn('No se pudo leer velez.com.ar/futbol/plantel:', err.message);
+  }
+  return jerseyByLastName;
+}
+
+function getTeamLogo(teamObj) {
+  if (!teamObj) return '';
+  if (teamObj.logo) return teamObj.logo;
+  if (teamObj.logos && teamObj.logos.length > 0) return teamObj.logos[0].href;
+  if (teamObj.id) return `https://a.espncdn.com/i/teamlogos/soccer/500/${teamObj.id}.png`;
+  return '';
 }
 
 function formatPastMatch(ev, targetTeamId) {
@@ -40,8 +85,8 @@ function formatPastMatch(ev, targetTeamId) {
   if (!teamObj || !oppObj) return null;
 
   const isHome = teamObj.homeAway === 'home';
-  const tGoals = parseInt(teamObj.score?.value ?? teamObj.score?.displayValue ?? 0);
-  const oGoals = parseInt(oppObj.score?.value ?? oppObj.score?.displayValue ?? 0);
+  const tGoals = parseInt(teamObj.score?.value ?? teamObj.score?.displayValue ?? 0, 10);
+  const oGoals = parseInt(oppObj.score?.value ?? oppObj.score?.displayValue ?? 0, 10);
 
   let outcome = 'E';
   if (tGoals > oGoals) outcome = 'G';
@@ -49,18 +94,22 @@ function formatPastMatch(ev, targetTeamId) {
 
   const d = new Date(ev.date);
   return {
+    id: String(ev.id),
     fecha: ev.seasonType?.abbreviation || 'LPF',
     comp: ev.league?.shortName || 'Liga Profesional',
     date: d.toLocaleDateString('es-AR', { day: '2-digit', month: 'short', timeZone: 'America/Argentina/Buenos_Aires' }),
     rival: oppObj.team?.shortDisplayName || oppObj.team?.displayName || 'Rival',
+    rivalLogo: getTeamLogo(oppObj.team),
     cond: isHome ? 'L' : 'V',
     velezGoals: isNaN(tGoals) ? 0 : tGoals,
     rivalGoals: isNaN(oGoals) ? 0 : oGoals,
+    teamGoals: isNaN(tGoals) ? 0 : tGoals,
+    oppGoals: isNaN(oGoals) ? 0 : oGoals,
+    score: `${isNaN(tGoals) ? 0 : tGoals} - ${isNaN(oGoals) ? 0 : oGoals}`,
     outcome
   };
 }
 
-// Mapeo EXACTO de tabla que funcionaba bien (sin mezclar abreviaturas ambiguas)
 function parseStandingsEntries(entries, velezId) {
   const rows = (entries || []).map(entry => {
     const team = entry.team || {};
@@ -74,7 +123,9 @@ function parseStandingsEntries(entries, velezId) {
     const pts = findExactStat('points');
 
     return {
+      id: String(team.id || ''),
       name: team.shortDisplayName || team.displayName || team.name,
+      logo: getTeamLogo(team),
       isVelez: String(team.id) === String(velezId),
       pj,
       pg: findExactStat('wins'),
@@ -83,8 +134,7 @@ function parseStandingsEntries(entries, velezId) {
       gf: findExactStat('pointsFor'),
       gc: findExactStat('pointsAgainst'),
       dg: findExactStat('pointDifferential'),
-      pts,
-      promedio: pj > 0 ? (pts / pj).toFixed(3) : '0.000'
+      pts
     };
   });
 
@@ -93,7 +143,7 @@ function parseStandingsEntries(entries, velezId) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v3 activo. Usá /api/velez-data' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v4 activo. Usá /api/velez-data' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
@@ -103,7 +153,6 @@ app.get('/api/velez-data', async (req, res) => {
   }
 
   try {
-    // 1. Obtener el ID de Vélez en ESPN
     const teamsRes = await axios.get(`${ESPN_LPF}/teams?region=ar&lang=es`);
     const allTeams = teamsRes.data?.sports?.[0]?.leagues?.[0]?.teams || [];
     const velezEntry = allTeams.find(t => {
@@ -116,24 +165,26 @@ app.get('/api/velez-data', async (req, res) => {
     }
     const velezId = String(velezEntry.team.id);
 
-    // 2. Consultas paralelas incluyendo fixture=true (próximos partidos) y enable=roster (dorsales completos)
     const [
       schedPastRes,
       schedFutureLpfRes,
       schedFutureCopaRes,
       teamInfoRes,
       rosterRes,
-      standingsRes
+      standingsRes,
+      officialJerseys
     ] = await Promise.allSettled([
       axios.get(`${ESPN_LPF}/teams/${velezId}/schedule?region=ar&lang=es`),
       axios.get(`${ESPN_LPF}/teams/${velezId}/schedule?fixture=true&region=ar&lang=es`),
       axios.get(`${ESPN_COPA}/teams/${velezId}/schedule?region=ar&lang=es`),
       axios.get(`${ESPN_LPF}/teams/${velezId}?enable=roster&region=ar&lang=es`),
       axios.get(`${ESPN_LPF}/teams/${velezId}/roster?region=ar&lang=es`),
-      axios.get(`${ESPN_WEB_LPF}/standings?region=ar&lang=es`)
+      axios.get(`${ESPN_WEB_LPF}/standings?region=ar&lang=es`),
+      fetchOfficialVelezJerseys()
     ]);
 
-    // Unificar todos los eventos pasados y futuros de Vélez
+    const velezWebJerseys = officialJerseys.status === 'fulfilled' ? officialJerseys.value : {};
+
     const eventMap = new Map();
     const collectEvents = (evArray) => {
       (evArray || []).forEach(ev => {
@@ -161,7 +212,7 @@ app.get('/api/velez-data', async (req, res) => {
 
       if (state === 'in') {
         liveEvent = ev;
-      } else if (state === 'pre' || (!completed && evTime > now - 3 * 3600 * 1000)) {
+      } else if (state === 'pre' || (!completed && evTime > now - 2 * 3600 * 1000)) {
         upcoming.push(ev);
       } else if (state === 'post' || completed) {
         finished.push(ev);
@@ -172,8 +223,8 @@ app.get('/api/velez-data', async (req, res) => {
     upcoming.sort((a, b) => new Date(a.date) - new Date(b.date));
 
     const lastMatches = finished.slice(0, 5).map(ev => formatPastMatch(ev, velezId)).filter(Boolean);
+    const velezLast2 = lastMatches.slice(0, 2);
 
-    // Calcular vallas invictas reales de los partidos jugados por Vélez
     const totalCleanSheetsSeason = finished.filter(ev => {
       const m = formatPastMatch(ev, velezId);
       return m && m.rivalGoals === 0;
@@ -193,14 +244,16 @@ app.get('/api/velez-data', async (req, res) => {
         date: d.toLocaleDateString('es-AR', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'America/Argentina/Buenos_Aires' }),
         timeART: d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Argentina/Buenos_Aires' }) + ' ART',
         rival: rival?.team?.shortDisplayName || rival?.team?.displayName || 'Rival',
+        rivalLogo: getTeamLogo(rival?.team),
         cond: isHome ? 'L' : 'V',
         stadium: comp.venue?.fullName || (isHome ? 'Estadio José Amalfitani' : 'Estadio a confirmar')
       };
     });
 
-    // --- PRÓXIMO PARTIDO Y RACHAS ("CÓMO LLEGA VÉLEZ Y RIVAL") ---
+    // --- PRÓXIMO PARTIDO, FECHA ISO EXACTA PARA CUENTA REGRESIVA Y ÚLTIMOS 2 PARTIDOS DEL RIVAL ---
     let currentMatch = null;
     let rivalLastMatches = [];
+    let rivalLast2 = [];
     const targetEv = liveEvent || upcoming[0] || finished[0];
 
     if (targetEv) {
@@ -218,35 +271,45 @@ app.get('/api/velez-data', async (req, res) => {
           );
           rFinished.sort((a, b) => new Date(b.date) - new Date(a.date));
           rivalLastMatches = rFinished.slice(0, 5).map(e => formatPastMatch(e, rivalId)).filter(Boolean);
+          rivalLast2 = rivalLastMatches.slice(0, 2);
         } catch (err) {
           rivalLastMatches = [];
         }
       }
 
+      // Normalizar fecha a ISO completo (YYYY-MM-DDTHH:mm:ss.000Z) para que new Date() en el frontend no falle nunca
+      const isoDateStrict = new Date(targetEv.date).toISOString();
+      const timestampMs = new Date(targetEv.date).getTime();
+
       currentMatch = {
         type: liveEvent ? 'LIVE' : 'NEXT',
-        velezForm: lastMatches,
-        rivalForm: rivalLastMatches,
-        rivalLastMatches,
+        timestamp: timestampMs,
+        isoDate: isoDateStrict,
+        velezForm: velezLast2,
+        rivalForm: rivalLast2,
+        velezLastMatches: velezLast2,
+        rivalLastMatches: rivalLast2,
         match: {
           teams: {
             home: {
               id: Number(homeC?.team?.id || homeC?.id || 0),
               name: homeC?.team?.shortDisplayName || homeC?.team?.displayName || 'Local',
-              logo: homeC?.team?.logos?.[0]?.href || ''
+              logo: getTeamLogo(homeC?.team)
             },
             away: {
               id: Number(awayC?.team?.id || awayC?.id || 0),
               name: awayC?.team?.shortDisplayName || awayC?.team?.displayName || 'Visitante',
-              logo: awayC?.team?.logos?.[0]?.href || ''
+              logo: getTeamLogo(awayC?.team)
             }
           },
           goals: {
-            home: parseInt(homeC?.score?.value ?? homeC?.score?.displayValue ?? 0) || 0,
-            away: parseInt(awayC?.score?.value ?? awayC?.score?.displayValue ?? 0) || 0
+            home: parseInt(homeC?.score?.value ?? homeC?.score?.displayValue ?? 0, 10) || 0,
+            away: parseInt(awayC?.score?.value ?? awayC?.score?.displayValue ?? 0, 10) || 0
           },
           fixture: {
-            date: targetEv.date,
+            date: isoDateStrict,
+            timestamp: Math.floor(timestampMs / 1000),
+            timestampMs,
             venue: { name: comp.venue?.fullName || 'Estadio José Amalfitani' },
             status: {
               short: liveEvent ? 'LIVE' : (upcoming.length > 0 ? 'NS' : 'FT'),
@@ -254,15 +317,60 @@ app.get('/api/velez-data', async (req, res) => {
             }
           },
           league: {
-            name: targetEv.league?.name || 'Liga Profesional',
+            name: targetEv.league?.name || 'Liga Profesional de Fútbol',
             round: comp.status?.type?.shortDetail || 'Torneo Local'
           }
         }
       };
     }
 
-    // --- PLANTEL CON CRUCE DE DORSALES DESDE TEAM_INFO + ROSTER ---
-    // Armamos un mapa de dorsales desde /teams/velezId?enable=roster por si /roster omite alguno
+    // --- ÚLTIMO 11 TITULAR REAL DE VÉLEZ (DESDE EL SUMMARY DEL ÚLTIMO PARTIDO JUGADO) ---
+    let lastLineup = { formation: '4-2-3-1', rival: '', date: '', starters: [] };
+    const jerseyFromMatchMap = new Map();
+
+    if (finished.length > 0) {
+      const lastGame = finished[0];
+      try {
+        const summaryRes = await axios.get(`${ESPN_LPF}/summary?event=${lastGame.id}&region=ar&lang=es`);
+        const rosters = summaryRes.data?.rosters || [];
+        const velezRoster = rosters.find(r => String(r.team?.id) === velezId);
+        const oppRoster = rosters.find(r => String(r.team?.id) !== velezId);
+
+        if (velezRoster && Array.isArray(velezRoster.roster)) {
+          // Guardar dorsales reales usados en los partidos para completar el plantel
+          velezRoster.roster.forEach(item => {
+            const pId = String(item.athlete?.id || '');
+            const jNum = parseInt(item.jersey, 10);
+            if (pId && !isNaN(jNum)) jerseyFromMatchMap.set(pId, jNum);
+          });
+
+          const startersRaw = velezRoster.roster.filter(item => item.starter === true);
+          lastLineup = {
+            formation: velezRoster.formation || '4-2-3-1',
+            rival: oppRoster?.team?.shortDisplayName || oppRoster?.team?.displayName || '',
+            date: new Date(lastGame.date).toLocaleDateString('es-AR', { day: '2-digit', month: 'short' }),
+            starters: startersRaw.slice(0, 11).map(item => {
+              const posInfo = mapPosition(item.position?.abbreviation, item.position?.displayName || item.position?.name);
+              return {
+                id: Number(item.athlete?.id || 0),
+                name: item.athlete?.displayName || item.athlete?.shortName || 'Jugador',
+                shortName: item.athlete?.shortName || item.athlete?.lastName || item.athlete?.displayName,
+                number: parseInt(item.jersey, 10) || '-',
+                position: item.position?.abbreviation || posInfo.group,
+                posLabel: posInfo.posLabel,
+                group: posInfo.group,
+                formationPlace: Number(item.formationPlace || 0),
+                photo: item.athlete?.headshot?.href || ''
+              };
+            })
+          };
+        }
+      } catch (err) {
+        console.warn('No se pudo obtener la formación del último partido:', err.message);
+      }
+    }
+
+    // --- PLANTEL CON DORSALES (ESPN + PARTIDOS + SITIO OFICIAL VELEZ.COM.AR) ---
     const jerseyMap = new Map();
     if (teamInfoRes.status === 'fulfilled' && teamInfoRes.value.data?.team?.athletes) {
       teamInfoRes.value.data.team.athletes.forEach(a => {
@@ -303,19 +411,30 @@ app.get('/api/velez-data', async (req, res) => {
           cleanSheets = apiCS > 0 ? apiCS : (pj > 0 ? Math.min(pj, totalCleanSheetsSeason || Math.max(0, pj - goalsConceded)) : 0);
         }
 
-        // Buscar dorsal en el jugador o en el mapa de respaldo de teamInfo
-        const rawJersey = p.jersey || jerseyMap.get(String(p.id));
-        const jerseyNumber = rawJersey && !isNaN(parseInt(rawJersey, 10)) ? parseInt(rawJersey, 10) : 0;
+        const fullNameNorm = normalizeStr(p.displayName || p.fullName);
+        const lastNameNorm = normalizeStr(p.lastName || fullNameNorm.split(' ').pop());
+
+        // Prioridad de dorsal: 1) ESPN Roster, 2) Planilla último partido, 3) Web Oficial velez.com.ar, 4) TeamInfo
+        const rawJersey =
+          p.jersey ||
+          jerseyFromMatchMap.get(String(p.id)) ||
+          velezWebJerseys[fullNameNorm] ||
+          velezWebJerseys[lastNameNorm] ||
+          jerseyMap.get(String(p.id));
+
+        const jerseyNumber = rawJersey && !isNaN(parseInt(rawJersey, 10)) ? parseInt(rawJersey, 10) : null;
 
         return {
           id: Number(p.id),
           name: p.displayName || p.fullName,
           age: p.age || 0,
           number: jerseyNumber,
+          dorsal: jerseyNumber,
+          jersey: jerseyNumber,
           position: p.position?.displayName || posInfo.posLabel,
           posLabel: posInfo.posLabel,
           group: posInfo.group,
-          photo: p.headshot?.href || velezEntry.team?.logos?.[0]?.href || '',
+          photo: p.headshot?.href || getTeamLogo(velezEntry.team),
           pj,
           goals: getStat(['totalGoals', 'G', 'goals']),
           cleanSheets,
@@ -325,31 +444,53 @@ app.get('/api/velez-data', async (req, res) => {
       });
     }
 
-    // --- TABLAS DE POSICIONES (CON LECTURA EXACTA RESTAURADA) ---
+    // --- TABLAS: CLAUSURA Y TABLA ANUAL GENERAL (CLASIFICACIÓN A COPAS, SIN PROMEDIOS) ---
     let standingsClausura = [];
     let standingsAnual = [];
-    let standingsPromedios = [];
 
     if (standingsRes.status === 'fulfilled' && standingsRes.value.data) {
       const data = standingsRes.value.data;
       const children = data.children || [];
 
+      // 1. Clausura
       if (children[0]?.standings?.entries) {
         standingsClausura = parseStandingsEntries(children[0].standings.entries, velezId);
       } else if (data.standings?.entries) {
         standingsClausura = parseStandingsEntries(data.standings.entries, velezId);
       }
 
-      if (children[1]?.standings?.entries) {
-        standingsAnual = parseStandingsEntries(children[1].standings.entries, velezId);
+      // 2. Buscar la Tabla Anual real (la que tiene los 28-30 equipos acumulados para las Copas)
+      const anualChild = children.find(c => {
+        const n = (c.name || c.abbreviation || '').toLowerCase();
+        return n.includes('anual') || n.includes('general') || n.includes('acumulad') || n.includes('overall') || (c.standings?.entries?.length >= 26);
+      });
+
+      if (anualChild?.standings?.entries) {
+        standingsAnual = parseStandingsEntries(anualChild.standings.entries, velezId);
+      } else if (children.length >= 2) {
+        // Si ESPN envía Zona A (children[0]) y Zona B (children[1]) por separado, las unificamos en la Tabla General de 28 equipos
+        const combinedMap = new Map();
+        children.forEach(ch => {
+          const parsed = parseStandingsEntries(ch.standings?.entries || [], velezId);
+          parsed.forEach(row => {
+            if (!combinedMap.has(row.name)) {
+              combinedMap.set(row.name, { ...row });
+            } else {
+              const ex = combinedMap.get(row.name);
+              ex.pj += row.pj;
+              ex.pg += row.pg;
+              ex.pe += row.pe;
+              ex.pp += row.pp;
+              ex.gf += row.gf;
+              ex.gc += row.gc;
+              ex.dg += row.dg;
+              ex.pts += row.pts;
+            }
+          });
+        });
+        standingsAnual = Array.from(combinedMap.values()).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
       } else {
         standingsAnual = [...standingsClausura];
-      }
-
-      if (children[2]?.standings?.entries) {
-        standingsPromedios = parseStandingsEntries(children[2].standings.entries, velezId);
-      } else {
-        standingsPromedios = [...standingsAnual].sort((a, b) => parseFloat(b.promedio) - parseFloat(a.promedio));
       }
     }
 
@@ -357,12 +498,14 @@ app.get('/api/velez-data', async (req, res) => {
       velezEspnIdDetectado: velezId,
       currentMatch,
       lastMatches,
+      velezLast2,
       rivalLastMatches,
+      rivalLast2,
       upcomingMatches,
       squad,
+      lastLineup,
       standingsClausura,
-      standingsAnual,
-      standingsPromedios
+      standingsAnual
     };
 
     cacheData = payload;
