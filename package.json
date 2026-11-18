@@ -1,7 +1,6 @@
 {
   "name": "velez-pizarra-backend",
   "version": "1.0.0",
-  "description": "Backend para sitio estilo promiedos de Vélez Sarsfield",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
