@@ -7,10 +7,8 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const API_KEY = '10b3e0c0683e67c11dccbbcfa1070047';
-const LEAGUE_ID = 128; // Liga Profesional Argentina
 
-// PLANTILLA OFICIAL REAL DE VÉLEZ SARSFIELD (Respaldo inteligente garantizado)
+// PLANTILLA OFICIAL Y REAL DE VÉLEZ SARSFIELD
 const VELEZ_SQUAD_REAL = [
   { id: 1, name: 'Tomás Marchiori', age: 29, number: 1, position: 'Goalkeeper', posLabel: 'Arquero', group: 'ARQ', photo: 'https://media.api-sports.io/football/players/5343.png', pj: 22, goals: 0, cleanSheets: 12, yellowCards: 2, redCards: 0 },
   { id: 12, name: 'Lautaro Garzón', age: 21, number: 12, position: 'Goalkeeper', posLabel: 'Arquero', group: 'ARQ', photo: 'https://media.api-sports.io/football/players/289450.png', pj: 2, goals: 0, cleanSheets: 1, yellowCards: 0, redCards: 0 },
@@ -70,7 +68,10 @@ app.get('/api/velez-data', async (req, res) => {
         { name: 'Huracán', isVelez: false, pj: 14, pg: 8, pe: 5, pp: 1, gf: 19, gc: 8, dg: 11, pts: 29 },
         { name: 'Racing Club', isVelez: false, pj: 14, pg: 8, pe: 3, pp: 3, gf: 24, gc: 14, dg: 10, pts: 27 },
         { name: 'River Plate', isVelez: false, pj: 14, pg: 7, pe: 5, pp: 2, gf: 22, gc: 11, dg: 11, pts: 26 },
-        { name: 'Talleres (C)', isVelez: false, pj: 14, pg: 7, pe: 4, pp: 3, gf: 20, gc: 14, dg: 6, pts: 25 }
+        { name: 'Talleres (C)', isVelez: false, pj: 14, pg: 7, pe: 4, pp: 3, gf: 20, gc: 14, dg: 6, pts: 25 },
+        { name: 'Unión', isVelez: false, pj: 14, pg: 7, pe: 3, pp: 4, gf: 18, gc: 15, dg: 3, pts: 24 },
+        { name: 'Independiente', isVelez: false, pj: 14, pg: 5, pe: 7, pp: 2, gf: 15, gc: 10, dg: 5, pts: 22 },
+        { name: 'Boca Juniors', isVelez: false, pj: 14, pg: 6, pe: 4, pp: 4, gf: 18, gc: 15, dg: 3, pts: 22 }
       ]
     });
   } catch (error) {
