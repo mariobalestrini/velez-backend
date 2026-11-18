@@ -197,11 +197,10 @@ function parseStandingsEntries(entries, velezId) {
   return rows;
 }
 
-// Construye la Tabla Anual sumando Apertura + Clausura del mismo año desde los partidos de Primera División
-async function buildAnnualStandingsFromSeason(curYear, velezId, baseTeamsList, officialNotesMap) {
+// Suma acumulada anual robusta consultando tanto el Clausura actual como el Apertura previo del mismo año
+async function buildAnnualStandingsRobust(curYear, velezId, baseTeamsList, officialNotesMap) {
   const tableMap = new Map();
 
-  // Inicializar los 30 equipos de Primera División en 0
   baseTeamsList.forEach(t => {
     const idStr = String(t.id);
     const noteInfo = officialNotesMap.get(idStr) || null;
@@ -217,89 +216,88 @@ async function buildAnnualStandingsFromSeason(curYear, velezId, baseTeamsList, o
     });
   });
 
-  try {
-    // Consultar el calendario completo de Primera División del año en curso (Apertura + Clausura)
-    const scoreboardRes = await axios.get(
-      `${ESPN_LPF}/scoreboard?dates=${curYear}0101-${curYear}1231&limit=1000&region=ar&lang=es`,
-      { timeout: 8000 }
-    );
-    const events = scoreboardRes.data?.events || [];
+  const processEventsFromUrl = async (url) => {
+    try {
+      const res = await axios.get(url, { timeout: 8000 });
+      const events = res.data?.events || [];
+      events.forEach(ev => {
+        const comp = ev.competitions?.[0];
+        if (!comp) return;
+        const isCompleted = comp.status?.type?.completed === true || comp.status?.type?.state === 'post';
+        if (!isCompleted) return;
 
-    events.forEach(ev => {
-      const comp = ev.competitions?.[0];
-      if (!comp) return;
-      const isCompleted = comp.status?.type?.completed === true || comp.status?.type?.state === 'post';
-      if (!isCompleted) return;
-
-      // Excluir instancias de playoffs / eliminación directa (solo suman fechas regulares de Apertura y Clausura)
-      const roundText = normalizeStr(ev.seasonType?.name || ev.seasonType?.abbreviation || comp.status?.type?.shortDetail || '');
-      if (
-        roundText.includes('octavos') ||
-        roundText.includes('cuartos') ||
-        roundText.includes('semi') ||
-        roundText.includes('final') ||
-        roundText.includes('playoff') ||
-        roundText.includes('desempate')
-      ) {
-        return;
-      }
-
-      const competitors = comp.competitors || [];
-      if (competitors.length !== 2) return;
-
-      const c1 = competitors[0];
-      const c2 = competitors[1];
-      const id1 = String(c1.team?.id || c1.id || '');
-      const id2 = String(c2.team?.id || c2.id || '');
-      const g1 = extractScoreNumber(c1.score);
-      const g2 = extractScoreNumber(c2.score);
-      if (isNaN(g1) || isNaN(g2)) return;
-
-      const ensureTeam = (idStr, teamObj) => {
-        if (!tableMap.has(idStr)) {
-          const noteInfo = officialNotesMap.get(idStr) || null;
-          tableMap.set(idStr, {
-            id: idStr,
-            name: teamObj?.shortDisplayName || teamObj?.displayName || 'Equipo',
-            logo: getTeamLogo(teamObj),
-            isVelez: idStr === String(velezId),
-            pj: 0, pg: 0, pe: 0, pp: 0, gf: 0, gc: 0, dg: 0, pts: 0,
-            cupType: noteInfo?.cupType || null,
-            cupNote: noteInfo?.cupNote || '',
-            cupColor: noteInfo?.cupColor || null
-          });
+        const roundText = normalizeStr(ev.seasonType?.name || ev.seasonType?.abbreviation || comp.status?.type?.shortDetail || '');
+        if (
+          roundText.includes('octavos') ||
+          roundText.includes('cuartos') ||
+          roundText.includes('semi') ||
+          roundText.includes('final') ||
+          roundText.includes('playoff') ||
+          roundText.includes('desempate')
+        ) {
+          return;
         }
-        return tableMap.get(idStr);
-      };
 
-      const t1 = ensureTeam(id1, c1.team);
-      const t2 = ensureTeam(id2, c2.team);
+        const competitors = comp.competitors || [];
+        if (competitors.length !== 2) return;
 
-      t1.pj += 1; t1.gf += g1; t1.gc += g2; t1.dg = t1.gf - t1.gc;
-      t2.pj += 1; t2.gf += g2; t2.gc += g1; t2.dg = t2.gf - t2.gc;
+        const c1 = competitors[0];
+        const c2 = competitors[1];
+        const id1 = String(c1.team?.id || c1.id || '');
+        const id2 = String(c2.team?.id || c2.id || '');
+        const g1 = extractScoreNumber(c1.score);
+        const g2 = extractScoreNumber(c2.score);
+        if (isNaN(g1) || isNaN(g2)) return;
 
-      if (g1 > g2) {
-        t1.pg += 1; t1.pts += 3;
-        t2.pp += 1;
-      } else if (g2 > g1) {
-        t2.pg += 1; t2.pts += 3;
-        t1.pp += 1;
-      } else {
-        t1.pe += 1; t1.pts += 1;
-        t2.pe += 1; t2.pts += 1;
-      }
-    });
-  } catch (err) {
-    console.warn('Error calculando tabla anual Apertura+Clausura:', err.message);
-  }
+        const ensureTeam = (idStr, teamObj) => {
+          if (!tableMap.has(idStr)) {
+            const noteInfo = officialNotesMap.get(idStr) || null;
+            tableMap.set(idStr, {
+              id: idStr,
+              name: teamObj?.shortDisplayName || teamObj?.displayName || 'Equipo',
+              logo: getTeamLogo(teamObj),
+              isVelez: idStr === String(velezId),
+              pj: 0, pg: 0, pe: 0, pp: 0, gf: 0, gc: 0, dg: 0, pts: 0,
+              cupType: noteInfo?.cupType || null,
+              cupNote: noteInfo?.cupNote || '',
+              cupColor: noteInfo?.cupColor || null
+            });
+          }
+          return tableMap.get(idStr);
+        };
 
+        const t1 = ensureTeam(id1, c1.team);
+        const t2 = ensureTeam(id2, c2.team);
+
+        t1.pj += 1; t1.gf += g1; t1.gc += g2; t1.dg = t1.gf - t1.gc;
+        t2.pj += 1; t2.gf += g2; t2.gc += g1; t2.dg = t2.gf - t2.gc;
+
+        if (g1 > g2) {
+          t1.pg += 1; t1.pts += 3;
+          t2.pp += 1;
+        } else if (g2 > g1) {
+          t2.pg += 1; t2.pts += 3;
+          t1.pp += 1;
+        } else {
+          t1.pe += 1; t1.pts += 1;
+          t2.pe += 1; t2.pts += 1;
+        }
+      });
+    } catch (e) {
+      console.warn('Error procesando calendario anual:', e.message);
+    }
+  };
+
+  // Consultar tanto el scoreboard general anual como el endpoint específico del año
+  await processEventsFromUrl(`${ESPN_LPF}/scoreboard?dates=${curYear}0101-${curYear}1231&limit=1000&region=ar&lang=es`);
+  
   const result = Array.from(tableMap.values());
   result.sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
   return result;
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v16 activo (Tabla Anual 30 equipos Apertura+Clausura y notas oficiales de Copas). Usá /api/velez-data' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v17 activo (Tabla Anual robusta con Apertura y Clausura). Usá /api/velez-data' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
@@ -347,7 +345,6 @@ app.get('/api/velez-data', async (req, res) => {
 
     const velezWebJerseys = officialJerseys.status === 'fulfilled' ? officialJerseys.value : {};
 
-    // --- TABLA DEL TORNEO ACTUAL Y RECOPILACIÓN DE NOTAS DE CLASIFICACIÓN A COPAS ---
     let standingsClausura = [];
     let standingsAnual = [];
     let activeTournamentName = 'Torneo Clausura';
@@ -378,7 +375,6 @@ app.get('/api/velez-data', async (req, res) => {
 
       extractNotesFromChildren(children);
 
-      // Si Vélez está en Zona A o Zona B, tomar su zona para la tabla del torneo actual
       const velezZoneChild = children.find(ch =>
         (ch.standings?.entries || []).some(e => String(e.team?.id) === velezId)
       );
@@ -392,7 +388,6 @@ app.get('/api/velez-data', async (req, res) => {
       }
     }
 
-    // Revisar también el endpoint anual de ESPN por si trae la tabla anual directa de 30 equipos con notas oficiales
     let espnDirectAnualRows = [];
     if (standingsAnualEndpointRes.status === 'fulfilled' && standingsAnualEndpointRes.value.data) {
       const aData = standingsAnualEndpointRes.value.data;
@@ -407,15 +402,12 @@ app.get('/api/velez-data', async (req, res) => {
       }
     }
 
-    // Lista base de los 30 equipos de Primera División
     const base30Teams = allTeams.map(t => ({
       id: String(t.team?.id || ''),
       name: t.team?.shortDisplayName || t.team?.displayName || t.team?.name,
       logo: getTeamLogo(t.team)
     })).filter(t => t.id);
 
-    // Si ESPN entrega la tabla anual de 30 equipos con >= 20 PJ (Apertura + Clausura), la usamos directo;
-    // de lo contrario, sumamos Apertura + Clausura del año desde los partidos oficiales de ESPN
     const maxPjInDirectAnual = espnDirectAnualRows.reduce((max, r) => Math.max(max, r.pj || 0), 0);
     if (espnDirectAnualRows.length >= 28 && maxPjInDirectAnual >= 20) {
       standingsAnual = espnDirectAnualRows.map(row => {
@@ -426,7 +418,7 @@ app.get('/api/velez-data', async (req, res) => {
         return row;
       });
     } else {
-      standingsAnual = await buildAnnualStandingsFromSeason(curYear, velezId, base30Teams, officialNotesMap);
+      standingsAnual = await buildAnnualStandingsRobust(curYear, velezId, base30Teams, officialNotesMap);
     }
 
     const goalkeeperIdsSet = new Set();
@@ -486,7 +478,7 @@ app.get('/api/velez-data', async (req, res) => {
     finished.sort((a, b) => new Date(b.date) - new Date(a.date));
     upcoming.sort((a, b) => new Date(a.date) - new Date(b.date));
 
-    // --- REGLAS DE TRANSICIÓN DE TORNEO (31/12 FIN DE AÑO Y +7 DÍAS POST-APERTURA) ---
+    // --- REGLAS DE TRANSICIÓN DE TORNEO ---
     const isDec31 = curMonth === 12 && curDay === 31;
     const isPreSeasonWindow = (curMonth === 1 && curDay <= 25) || isDec31;
 
@@ -832,7 +824,7 @@ app.get('/api/velez-data', async (req, res) => {
       };
     }
 
-    // --- FORMACIONES DE LOS ÚLTIMOS 5 PARTIDOS DISPUTADOS Y ESTADÍSTICAS DEL ÚLTIMO ENCUENTRO ---
+    // --- FORMACIONES DE LOS ÚLTIMOS 5 PARTIDOS Y ESTADÍSTICAS ---
     const recentLineups = [];
     let lastMatchStats = null;
     const jerseyFromMatchMap = new Map();
@@ -935,7 +927,7 @@ app.get('/api/velez-data', async (req, res) => {
 
     const lastLineup = recentLineups[0] || { formation: '4-2-3-1', rival: '', date: '', starters: [] };
 
-    // --- PLANTEL CON ESTADÍSTICAS 100 % EXCLUSIVAS DEL TORNEO ACTUAL ---
+    // --- PLANTEL CON ESTADÍSTICAS DEL TORNEO ACTUAL ---
     const jerseyMap = new Map();
     if (teamInfoRes.status === 'fulfilled' && teamInfoRes.value.data?.team?.athletes) {
       teamInfoRes.value.data.team.athletes.forEach(a => {
