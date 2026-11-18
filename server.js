@@ -8,30 +8,29 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Configuración oficial de ESPN Deportes Argentina
 const ESPN_BASE = 'https://site.api.espn.com/apis/site/v2/sports/soccer/arg.1';
 const ESPN_WEB_API = 'https://site.web.api.espn.com/apis/v2/sports/soccer/arg.1';
-const VELEZ_ESPN_ID = '21'; // ID único de Club Atlético Vélez Sarsfield en ESPN
 
 let cacheData = null;
 let cacheTime = 0;
-const CACHE_TTL = 60 * 1000; // 1 minuto de caché
+const CACHE_TTL = 60 * 1000;
 
-// Traductor de posiciones al español con los grupos de tu frontend
 function mapPosition(posAbbr, posName) {
   const abbr = (posAbbr || '').toUpperCase();
-  if (abbr === 'G' || abbr === 'GK' || (posName && posName.toLowerCase().includes('arquero'))) {
+  const name = (posName || '').toLowerCase();
+  if (abbr === 'G' || abbr === 'GK' || name.includes('arquero') || name.includes('goalkeeper')) {
     return { group: 'ARQ', posLabel: 'Arquero' };
   }
-  if (abbr === 'D' || abbr === 'DF' || (posName && posName.toLowerCase().includes('defensor'))) {
+  if (abbr === 'D' || abbr === 'DF' || name.includes('defensor') || name.includes('defender')) {
     return { group: 'DEF', posLabel: 'Defensor' };
   }
-  if (abbr === 'F' || abbr === 'FW' || abbr === 'A' || (posName && posName.toLowerCase().includes('delantero')) || (posName && posName.toLowerCase().includes('atacante'))) {
+  if (abbr === 'F' || abbr === 'FW' || abbr === 'A' || name.includes('delantero') || name.includes('atacante') || name.includes('forward')) {
     return { group: 'DEL', posLabel: 'Delantero' };
   }
   return { group: 'MED', posLabel: 'Mediocampista' };
 }
 
+// Ruta principal para tu web
 app.get('/api/velez-data', async (req, res) => {
   const now = Date.now();
   if (cacheData && (now - cacheTime < CACHE_TTL)) {
@@ -39,21 +38,35 @@ app.get('/api/velez-data', async (req, res) => {
   }
 
   try {
-    // 1. Peticiones en paralelo a ESPN Argentina (Calendario, Plantel y Tabla de Posiciones)
+    // 1. Obtener la lista oficial de equipos de Argentina en ESPN y encontrar el ID real de Vélez
+    const teamsRes = await axios.get(`${ESPN_BASE}/teams?region=ar&lang=es`);
+    const allTeams = teamsRes.data?.sports?.[0]?.leagues?.[0]?.teams || [];
+    
+    const velezEntry = allTeams.find(t => {
+      const name = (t.team?.displayName || t.team?.name || '').toLowerCase();
+      return name.includes('vélez') || name.includes('velez');
+    });
+
+    if (!velezEntry) {
+      return res.status(404).json({ error: 'No se encontró a Vélez en la lista de equipos de ESPN arg.1' });
+    }
+
+    const velezId = String(velezEntry.team.id);
+
+    // 2. Con el ID real verificado, pedimos Fixture, Plantel y Tabla de Posiciones en paralelo
     const [scheduleRes, rosterRes, standingsRes] = await Promise.allSettled([
-      axios.get(`${ESPN_BASE}/teams/${VELEZ_ESPN_ID}/schedule?region=ar&lang=es`),
-      axios.get(`${ESPN_BASE}/teams/${VELEZ_ESPN_ID}/roster?region=ar&lang=es`),
+      axios.get(`${ESPN_BASE}/teams/${velezId}/schedule?region=ar&lang=es`),
+      axios.get(`${ESPN_BASE}/teams/${velezId}/roster?region=ar&lang=es`),
       axios.get(`${ESPN_WEB_API}/standings?region=ar&lang=es`)
     ]);
 
-    // --- A. PROCESAR PARTIDOS (ÚLTIMOS, PRÓXIMOS Y EN VIVO) ---
+    // --- A. PROCESAR PARTIDOS ---
     let lastMatches = [];
     let upcomingMatches = [];
     let currentMatch = null;
 
-    if (scheduleRes.status === 'fulfilled' && scheduleRes.value.data.events) {
+    if (scheduleRes.status === 'fulfilled' && scheduleRes.value.data?.events) {
       const events = scheduleRes.value.data.events;
-
       const finished = [];
       const upcoming = [];
       let liveEvent = null;
@@ -61,20 +74,18 @@ app.get('/api/velez-data', async (req, res) => {
       events.forEach(ev => {
         const comp = ev.competitions?.[0];
         if (!comp) return;
-
-        const state = comp.status?.type?.state; // 'pre' (futuro), 'in' (en vivo), 'post' (finalizado)
+        const state = comp.status?.type?.state;
         if (state === 'post') finished.push(ev);
         else if (state === 'pre') upcoming.push(ev);
         else if (state === 'in') liveEvent = ev;
       });
 
-      // Ordenar finalizados del más reciente al más antiguo
       finished.sort((a, b) => new Date(b.date) - new Date(a.date));
       lastMatches = finished.slice(0, 5).map(ev => {
         const comp = ev.competitions[0];
         const competitors = comp.competitors || [];
-        const velez = competitors.find(c => String(c.id) === VELEZ_ESPN_ID || c.team?.id === VELEZ_ESPN_ID);
-        const rival = competitors.find(c => String(c.id) !== VELEZ_ESPN_ID && c.team?.id !== VELEZ_ESPN_ID);
+        const velez = competitors.find(c => String(c.id) === velezId || String(c.team?.id) === velezId);
+        const rival = competitors.find(c => String(c.id) !== velezId && String(c.team?.id) !== velezId);
 
         const isHome = velez?.homeAway === 'home';
         const vGoals = parseInt(velez?.score?.value ?? velez?.score?.displayValue ?? 0);
@@ -91,19 +102,18 @@ app.get('/api/velez-data', async (req, res) => {
           date: d.toLocaleDateString('es-AR', { day: '2-digit', month: 'short', timeZone: 'America/Argentina/Buenos_Aires' }),
           rival: rival?.team?.shortDisplayName || rival?.team?.displayName || 'Rival',
           cond: isHome ? 'L' : 'V',
-          velezGoals: vGoals,
-          rivalGoals: rGoals,
-          outcome: outcome
+          velezGoals: isNaN(vGoals) ? 0 : vGoals,
+          rivalGoals: isNaN(rGoals) ? 0 : rGoals,
+          outcome
         };
       });
 
-      // Ordenar próximos del más cercano al más lejano
       upcoming.sort((a, b) => new Date(a.date) - new Date(b.date));
       upcomingMatches = upcoming.slice(0, 4).map(ev => {
         const comp = ev.competitions[0];
         const competitors = comp.competitors || [];
-        const velez = competitors.find(c => String(c.id) === VELEZ_ESPN_ID || c.team?.id === VELEZ_ESPN_ID);
-        const rival = competitors.find(c => String(c.id) !== VELEZ_ESPN_ID && c.team?.id !== VELEZ_ESPN_ID);
+        const velez = competitors.find(c => String(c.id) === velezId || String(c.team?.id) === velezId);
+        const rival = competitors.find(c => String(c.id) !== velezId && String(c.team?.id) !== velezId);
 
         const isHome = velez?.homeAway === 'home';
         const d = new Date(ev.date);
@@ -119,7 +129,6 @@ app.get('/api/velez-data', async (req, res) => {
         };
       });
 
-      // Armar el objeto currentMatch con el formato exacto que espera tu index.html
       const targetEv = liveEvent || upcoming[0] || finished[0];
       if (targetEv) {
         const comp = targetEv.competitions[0];
@@ -134,8 +143,8 @@ app.get('/api/velez-data', async (req, res) => {
               away: { name: awayC?.team?.shortDisplayName || awayC?.team?.displayName || 'Visitante', logo: awayC?.team?.logos?.[0]?.href }
             },
             goals: {
-              home: parseInt(homeC?.score?.value ?? homeC?.score?.displayValue ?? 0),
-              away: parseInt(awayC?.score?.value ?? awayC?.score?.displayValue ?? 0)
+              home: parseInt(homeC?.score?.value ?? homeC?.score?.displayValue ?? 0) || 0,
+              away: parseInt(awayC?.score?.value ?? awayC?.score?.displayValue ?? 0) || 0
             },
             fixture: {
               date: targetEv.date,
@@ -146,7 +155,7 @@ app.get('/api/velez-data', async (req, res) => {
               }
             },
             league: {
-              name: targetEv.league?.name || 'Liga Profesional Argentina',
+              name: targetEv.league?.name || 'Liga Profesional',
               round: comp.status?.type?.shortDetail || 'Torneo Local'
             }
           }
@@ -154,12 +163,10 @@ app.get('/api/velez-data', async (req, res) => {
       }
     }
 
-    // --- B. PROCESAR PLANTEL Y ESTADÍSTICAS REALES ---
+    // --- B. PROCESAR PLANTEL Y ESTADÍSTICAS ---
     let squad = [];
-    if (rosterRes.status === 'fulfilled' && rosterRes.value.data.athletes) {
+    if (rosterRes.status === 'fulfilled' && rosterRes.value.data?.athletes) {
       const rawAthletes = rosterRes.value.data.athletes;
-
-      // En ESPN los jugadores pueden venir directos o agrupados por posición
       let playerList = [];
       rawAthletes.forEach(item => {
         if (item.items && Array.isArray(item.items)) {
@@ -171,13 +178,15 @@ app.get('/api/velez-data', async (req, res) => {
 
       squad = playerList.map(p => {
         const posInfo = mapPosition(p.position?.abbreviation, p.position?.displayName || p.position?.name);
-
-        // Extraer estadísticas de la temporada en curso desde el objeto de ESPN
         const splits = p.statistics?.splits?.categories || [];
-        const getStat = (statName) => {
+        
+        const getStat = (names) => {
           for (const cat of splits) {
-            const found = (cat.stats || []).find(s => s.name === statName || s.abbreviation === statName);
-            if (found && found.value !== undefined) return Number(found.value);
+            for (const st of (cat.stats || [])) {
+              if (names.includes(st.name) || names.includes(st.abbreviation)) {
+                return Number(st.value) || 0;
+              }
+            }
           }
           return 0;
         };
@@ -187,24 +196,23 @@ app.get('/api/velez-data', async (req, res) => {
           name: p.displayName || p.fullName,
           age: p.age || null,
           number: p.jersey ? Number(p.jersey) : null,
-          position: p.position?.name || posInfo.posLabel,
+          position: p.position?.displayName || posInfo.posLabel,
           posLabel: posInfo.posLabel,
           group: posInfo.group,
-          photo: p.headshot?.href || `https://a.espncdn.com/i/teamlogos/soccer/500/${VELEZ_ESPN_ID}.png`,
-          pj: getStat('appearances') || getStat('GP'),
-          goals: getStat('totalGoals') || getStat('G'),
-          cleanSheets: posInfo.group === 'ARQ' ? (getStat('cleanSheets') || getStat('CS')) : null,
-          yellowCards: getStat('yellowCards') || getStat('YC'),
-          redCards: getStat('redCards') || getStat('RC')
+          photo: p.headshot?.href || velezEntry.team?.logos?.[0]?.href || '',
+          pj: getStat(['appearances', 'GP', 'subIns']),
+          goals: getStat(['totalGoals', 'G', 'goals']),
+          cleanSheets: posInfo.group === 'ARQ' ? getStat(['cleanSheets', 'CS']) : null,
+          yellowCards: getStat(['yellowCards', 'YC']),
+          redCards: getStat(['redCards', 'RC'])
         };
       });
     }
 
-    // --- C. PROCESAR TABLA DE POSICIONES EN VIVO ---
+    // --- C. PROCESAR TABLA DE POSICIONES ---
     let standingsClausura = [];
     if (standingsRes.status === 'fulfilled' && standingsRes.value.data) {
       const data = standingsRes.value.data;
-      // Buscar las entradas de la tabla actual
       const entries = data.children?.[0]?.standings?.entries || data.standings?.entries || [];
 
       standingsClausura = entries.map(entry => {
@@ -217,7 +225,7 @@ app.get('/api/velez-data', async (req, res) => {
 
         return {
           name: team.shortDisplayName || team.displayName || team.name,
-          isVelez: String(team.id) === VELEZ_ESPN_ID,
+          isVelez: String(team.id) === velezId,
           pj: findStat('gamesPlayed'),
           pg: findStat('wins'),
           pe: findStat('ties'),
@@ -228,9 +236,13 @@ app.get('/api/velez-data', async (req, res) => {
           pts: findStat('points')
         };
       });
+
+      // Ordenar por puntos de mayor a menor por si ESPN la manda en orden alfabético
+      standingsClausura.sort((a, b) => b.pts - a.pts || b.dg - a.dg);
     }
 
     const payload = {
+      velezEspnIdDetectado: velezId,
       currentMatch,
       lastMatches,
       upcomingMatches,
@@ -243,14 +255,13 @@ app.get('/api/velez-data', async (req, res) => {
     res.json(payload);
 
   } catch (error) {
-    console.error("Error al consultar ESPN Argentina:", error.message);
     res.status(500).json({
-      error: 'Error al consultar ESPN Argentina',
-      detalle: error.message
+      error: 'Fallo al procesar datos de ESPN',
+      mensaje: error.message
     });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor conectado a ESPN Argentina en puerto ${PORT}`);
+  console.log(`Servidor corriendo en puerto ${PORT}`);
 });
