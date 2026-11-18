@@ -39,6 +39,27 @@ function mapPosition(posAbbr, posName) {
   return { group: 'MED', posLabel: 'Mediocampista' };
 }
 
+function mapCountryToIso(countryRaw) {
+  const c = normalizeStr(countryRaw);
+  if (!c) return { code: 'ar', label: 'Argentina' };
+  if (c.includes('argentin')) return { code: 'ar', label: 'Argentina' };
+  if (c.includes('uruguay')) return { code: 'uy', label: 'Uruguay' };
+  if (c.includes('chile')) return { code: 'cl', label: 'Chile' };
+  if (c.includes('paraguay')) return { code: 'py', label: 'Paraguay' };
+  if (c.includes('colombia')) return { code: 'co', label: 'Colombia' };
+  if (c.includes('brasil') || c.includes('brazil')) return { code: 'br', label: 'Brasil' };
+  if (c.includes('peru')) return { code: 'pe', label: 'Perú' };
+  if (c.includes('ecuador')) return { code: 'ec', label: 'Ecuador' };
+  if (c.includes('venezuela')) return { code: 've', label: 'Venezuela' };
+  if (c.includes('bolivia')) return { code: 'bo', label: 'Bolivia' };
+  if (c.includes('mexic')) return { code: 'mx', label: 'México' };
+  if (c.includes('estados unidos') || c.includes('united states') || c === 'usa') return { code: 'us', label: 'Estados Unidos' };
+  if (c.includes('espana') || c.includes('spain')) return { code: 'es', label: 'España' };
+  if (c.includes('italia') || c.includes('italy')) return { code: 'it', label: 'Italia' };
+  if (c.includes('francia') || c.includes('france')) return { code: 'fr', label: 'Francia' };
+  return { code: 'ar', label: countryRaw || 'Argentina' };
+}
+
 function extractScoreNumber(scoreField) {
   if (scoreField === null || scoreField === undefined) return NaN;
   if (typeof scoreField === 'number') return scoreField;
@@ -166,7 +187,7 @@ function parseStandingsEntries(entries, velezId) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v10 activo (con estadísticas del último partido). Usá /api/velez-data' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v11 activo (con banderas de nacionalidad). Usá /api/velez-data' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
@@ -514,7 +535,7 @@ app.get('/api/velez-data', async (req, res) => {
       };
     }
 
-    // --- ÚLTIMO 11 TITULAR Y ESTADÍSTICAS DEL ÚLTIMO PARTIDO (POSESIÓN Y TIROS) ---
+    // --- ÚLTIMO 11 TITULAR Y ESTADÍSTICAS DEL ÚLTIMO PARTIDO ---
     let lastLineup = { formation: '4-2-3-1', rival: '', date: '', starters: [] };
     let lastMatchStats = null;
     const jerseyFromMatchMap = new Map();
@@ -560,7 +581,6 @@ app.get('/api/velez-data', async (req, res) => {
           };
         }
 
-        // Extraer Posesión y Tiros del boxscore oficial del último partido
         const boxTeams = summaryRes.data?.boxscore?.teams || [];
         const velezBox = boxTeams.find(b => String(b.team?.id) === velezId);
         const oppBox = boxTeams.find(b => String(b.team?.id) !== velezId);
@@ -593,7 +613,7 @@ app.get('/api/velez-data', async (req, res) => {
       }
     }
 
-    // --- PLANTEL ---
+    // --- PLANTEL CON BANDERA DE NACIONALIDAD ---
     const jerseyMap = new Map();
     if (teamInfoRes.status === 'fulfilled' && teamInfoRes.value.data?.team?.athletes) {
       teamInfoRes.value.data.team.athletes.forEach(a => {
@@ -649,6 +669,10 @@ app.get('/api/velez-data', async (req, res) => {
 
         const jerseyNumber = rawJersey && !isNaN(parseInt(rawJersey, 10)) ? parseInt(rawJersey, 10) : null;
 
+        // Extraer nacionalidad y convertirla a código ISO de bandera
+        const rawCountry = p.citizenship || p.birthPlace?.country || p.flag?.alt || 'Argentina';
+        const countryInfo = mapCountryToIso(rawCountry);
+
         return {
           id: Number(p.id),
           name: p.displayName || p.fullName,
@@ -659,6 +683,9 @@ app.get('/api/velez-data', async (req, res) => {
           position: p.position?.displayName || posInfo.posLabel,
           posLabel: posInfo.posLabel,
           group: posInfo.group,
+          countryCode: countryInfo.code,
+          countryName: countryInfo.label,
+          flagUrl: `https://flagcdn.com/w80/${countryInfo.code}.png`,
           photo: p.headshot?.href || velezLogoUrl,
           pj,
           goals: getStat(['totalGoals', 'G', 'goals']),
