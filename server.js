@@ -24,6 +24,17 @@ function normalizeStr(str) {
     .trim();
 }
 
+function getArgentinaNowParts(nowMs = Date.now()) {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
+  const [year, month, day] = fmt.format(new Date(nowMs)).split('-').map(Number);
+  return { year, month, day };
+}
+
 function mapPosition(posAbbr, posName) {
   const abbr = (posAbbr || '').toUpperCase();
   const name = (posName || '').toLowerCase();
@@ -187,7 +198,7 @@ function parseStandingsEntries(entries, velezId) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v13 activo (estadísticas 100% exclusivas del torneo actual). Usá /api/velez-data' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v14 activo (corte 31/12 y +7 días post-Apertura). Usá /api/velez-data' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
@@ -231,7 +242,7 @@ app.get('/api/velez-data', async (req, res) => {
 
     const velezWebJerseys = officialJerseys.status === 'fulfilled' ? officialJerseys.value : {};
 
-    // --- TABLAS (Las procesamos primero para saber exactamente cuántos PJ lleva Vélez en el torneo actual) ---
+    // --- TABLAS ---
     let standingsClausura = [];
     let standingsAnual = [];
     let activeTournamentName = 'Torneo Clausura';
@@ -287,9 +298,6 @@ app.get('/api/velez-data', async (req, res) => {
         standingsAnual = [...standingsClausura];
       }
     }
-
-    const velezClausuraRow = standingsClausura.find(t => t.isVelez);
-    const exactClausuraMatchesCount = velezClausuraRow && velezClausuraRow.pj > 0 ? velezClausuraRow.pj : 16;
 
     const goalkeeperIdsSet = new Set();
     const playerNameToIdMap = new Map();
@@ -348,20 +356,66 @@ app.get('/api/velez-data', async (req, res) => {
     finished.sort((a, b) => new Date(b.date) - new Date(a.date));
     upcoming.sort((a, b) => new Date(a.date) - new Date(b.date));
 
+    // --- REGLAS DE TRANSICIÓN DE TORNEO (31/12 FIN DE AÑO Y +7 DÍAS POST-APERTURA) ---
+    const { year: curYear, month: curMonth, day: curDay } = getArgentinaNowParts(now);
+    const isDec31 = curMonth === 12 && curDay === 31;
+    const isPreSeasonWindow = (curMonth === 1 && curDay <= 25) || isDec31;
+
+    const lpfFinishedAll = finished.filter(ev => ev._isLpfTournament === true);
+    const lpfUpcomingAll = upcoming.filter(ev => ev._isLpfTournament === true);
+    const lastLpfMatch = lpfFinishedAll[0] || null;
+    const daysSinceLastLpf = lastLpfMatch
+      ? (now - new Date(lastLpfMatch.date).getTime()) / (1000 * 60 * 60 * 24)
+      : Infinity;
+
+    // Detectar si estamos en el receso de mitad de año (sin próximos partidos de Apertura y más de 7 días desde el final del Apertura)
+    const isMidYearTransitionAfter7Days =
+      curMonth >= 5 &&
+      curMonth <= 8 &&
+      lpfUpcomingAll.length === 0 &&
+      daysSinceLastLpf > 7;
+
+    const velezTableRow = standingsClausura.find(t => t.isVelez);
+    let exactTournamentMatchesCount = velezTableRow && velezTableRow.pj > 0 ? velezTableRow.pj : 16;
+
+    // 1. Corte de fin de año el 31/12: reinicia a 0 para el Apertura del año siguiente
+    if (isDec31) {
+      activeTournamentName = `Torneo Apertura ${curYear + 1}`;
+      exactTournamentMatchesCount = 0;
+      standingsClausura = standingsClausura.map(t => ({
+        ...t, pj: 0, pg: 0, pe: 0, pp: 0, gf: 0, gc: 0, dg: 0, pts: 0
+      }));
+      standingsAnual = standingsAnual.map(t => ({
+        ...t, pj: 0, pg: 0, pe: 0, pp: 0, gf: 0, gc: 0, dg: 0, pts: 0
+      }));
+    } else if (isPreSeasonWindow && (!velezTableRow || velezTableRow.pj === 0)) {
+      activeTournamentName = `Torneo Apertura ${curYear}`;
+      exactTournamentMatchesCount = 0;
+    }
+    // 2. Corte de mitad de año a los 7 días de terminar el Torneo Apertura: cambia al Clausura en 0 hasta su inicio
+    else if (isMidYearTransitionAfter7Days) {
+      activeTournamentName = `Torneo Clausura ${curYear}`;
+      exactTournamentMatchesCount = 0;
+      standingsClausura = standingsClausura.map(t => ({
+        ...t, pj: 0, pg: 0, pe: 0, pp: 0, gf: 0, gc: 0, dg: 0, pts: 0
+      }));
+    } else if (velezTableRow && velezTableRow.pj === 0) {
+      exactTournamentMatchesCount = 0;
+    }
+
     const lastMatches = finished.slice(0, 5).map(ev => formatPastMatch(ev, velezId)).filter(Boolean);
     const velezLast2 = lastMatches.slice(0, 2);
 
-    // --- CONTEO PARTIDO POR PARTIDO EXCLUSIVO DEL TORNEO ACTUAL (SIN APERTURA NI COPA ARGENTINA) ---
+    // --- CONTEO PARTIDO POR PARTIDO EXCLUSIVO DEL TORNEO ACTUAL ---
     const cleanSheetsByGkId = new Map();
     const playedMatchesByPlayerId = new Map();
     const velezGoalsByPlayerId = new Map();
     const velezYellowsByPlayerId = new Map();
     const velezRedsByPlayerId = new Map();
 
-    // Tomamos ÚNICAMENTE los últimos `exactClausuraMatchesCount` partidos finalizados de Primera División (arg.1)
-    const currentTournamentEvents = finished
-      .filter(ev => ev._isLpfTournament === true)
-      .slice(0, exactClausuraMatchesCount);
+    const currentTournamentEvents = exactTournamentMatchesCount > 0
+      ? lpfFinishedAll.slice(0, exactTournamentMatchesCount)
+      : [];
 
     if (currentTournamentEvents.length > 0) {
       const summaries = await Promise.allSettled(
@@ -378,7 +432,6 @@ app.get('/api/velez-data', async (req, res) => {
         const rosters = sumData.rosters || [];
         const velezRoster = rosters.find(r => String(r.team?.id) === velezId);
 
-        // 1. Sumar PJ de cada jugador que participó en este partido del torneo actual
         if (velezRoster && Array.isArray(velezRoster.roster)) {
           velezRoster.roster.forEach(item => {
             const athId = String(item.athlete?.id || '');
@@ -389,7 +442,6 @@ app.get('/api/velez-data', async (req, res) => {
             }
           });
 
-          // Vallas invictas de arqueros
           const gksInMatch = velezRoster.roster.filter(item => {
             const athId = String(item.athlete?.id || '');
             const pos = mapPosition(item.position?.abbreviation, item.position?.displayName || item.position?.name);
@@ -418,7 +470,6 @@ app.get('/api/velez-data', async (req, res) => {
           });
         }
 
-        // 2. Sumar Goles, Amarillas y Rojas desde keyEvents / details oficiales del partido
         const matchEvents =
           sumData.keyEvents ||
           sumData.header?.competitions?.[0]?.details ||
@@ -750,7 +801,6 @@ app.get('/api/velez-data', async (req, res) => {
         const pIdStr = String(p.id);
         const posInfo = mapPosition(p.position?.abbreviation, p.position?.displayName || p.position?.name);
 
-        // Usamos exclusivamente el conteo extraído de los partidos jugados del torneo actual
         const pj = playedMatchesByPlayerId.get(pIdStr) || 0;
         const goalsInTournament = velezGoalsByPlayerId.get(pIdStr) || 0;
         const yellowsInTournament = velezYellowsByPlayerId.get(pIdStr) || 0;
