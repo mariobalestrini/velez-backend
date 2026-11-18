@@ -187,7 +187,7 @@ function parseStandingsEntries(entries, velezId) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v12 activo (goleadores exclusivos de Vélez en el torneo). Usá /api/velez-data' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v13 activo (estadísticas 100% exclusivas del torneo actual). Usá /api/velez-data' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
@@ -231,22 +231,80 @@ app.get('/api/velez-data', async (req, res) => {
 
     const velezWebJerseys = officialJerseys.status === 'fulfilled' ? officialJerseys.value : {};
 
+    // --- TABLAS (Las procesamos primero para saber exactamente cuántos PJ lleva Vélez en el torneo actual) ---
+    let standingsClausura = [];
+    let standingsAnual = [];
     let activeTournamentName = 'Torneo Clausura';
+
     if (standingsRes.status === 'fulfilled' && standingsRes.value.data) {
-      const stData = standingsRes.value.data;
-      const rawTourneyName = stData.children?.[0]?.name || stData.name || '';
+      const data = standingsRes.value.data;
+      const children = data.children || [];
+      const rawTourneyName = children[0]?.name || data.name || '';
       if (rawTourneyName) {
         activeTournamentName = rawTourneyName;
       }
+
+      if (children[0]?.standings?.entries) {
+        standingsClausura = parseStandingsEntries(children[0].standings.entries, velezId);
+      } else if (data.standings?.entries) {
+        standingsClausura = parseStandingsEntries(data.standings.entries, velezId);
+      }
+
+      const anualChild = children.find(c => {
+        const n = (c.name || c.abbreviation || '').toLowerCase();
+        return n.includes('anual') || n.includes('general') || n.includes('acumulad') || n.includes('overall') || (c.standings?.entries?.length >= 26);
+      });
+
+      if (anualChild?.standings?.entries) {
+        standingsAnual = parseStandingsEntries(anualChild.standings.entries, velezId);
+      } else if (children.length >= 2) {
+        const combinedMap = new Map();
+        children.forEach(ch => {
+          const parsed = parseStandingsEntries(ch.standings?.entries || [], velezId);
+          parsed.forEach(row => {
+            if (!combinedMap.has(row.name)) {
+              combinedMap.set(row.name, { ...row });
+            } else {
+              const ex = combinedMap.get(row.name);
+              ex.pj += row.pj;
+              ex.pg += row.pg;
+              ex.pe += row.pe;
+              ex.pp += row.pp;
+              ex.gf += row.gf;
+              ex.gc += row.gc;
+              ex.dg += row.dg;
+              ex.pts += row.pts;
+              if (!ex.cupType && row.cupType) {
+                ex.cupType = row.cupType;
+                ex.cupNote = row.cupNote;
+                ex.cupColor = row.cupColor;
+              }
+            }
+          });
+        });
+        standingsAnual = Array.from(combinedMap.values()).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
+      } else {
+        standingsAnual = [...standingsClausura];
+      }
     }
 
+    const velezClausuraRow = standingsClausura.find(t => t.isVelez);
+    const exactClausuraMatchesCount = velezClausuraRow && velezClausuraRow.pj > 0 ? velezClausuraRow.pj : 16;
+
     const goalkeeperIdsSet = new Set();
+    const playerNameToIdMap = new Map();
     if (rosterRes.status === 'fulfilled' && rosterRes.value.data?.athletes) {
       rosterRes.value.data.athletes.forEach(item => {
         const list = Array.isArray(item.items) ? item.items : [item];
         list.forEach(p => {
           const pos = mapPosition(p.position?.abbreviation, p.position?.displayName || p.position?.name);
           if (pos.group === 'ARQ' && p.id) goalkeeperIdsSet.add(String(p.id));
+          if (p.id) {
+            const nFull = normalizeStr(p.displayName || p.fullName);
+            const nShort = normalizeStr(p.shortName || p.lastName);
+            if (nFull) playerNameToIdMap.set(nFull, String(p.id));
+            if (nShort && !playerNameToIdMap.has(nShort)) playerNameToIdMap.set(nShort, String(p.id));
+          }
         });
       });
     }
@@ -255,7 +313,8 @@ app.get('/api/velez-data', async (req, res) => {
     const collectEvents = (evArray, isLpfOnly = false) => {
       (evArray || []).forEach(ev => {
         if (ev && ev.id && ev.competitions?.[0]) {
-          ev._isLpfTournament = isLpfOnly || !(ev.league?.slug || '').includes('copa');
+          const existing = eventMap.get(String(ev.id));
+          ev._isLpfTournament = Boolean(existing?._isLpfTournament || isLpfOnly);
           eventMap.set(String(ev.id), ev);
         }
       });
@@ -292,86 +351,113 @@ app.get('/api/velez-data', async (req, res) => {
     const lastMatches = finished.slice(0, 5).map(ev => formatPastMatch(ev, velezId)).filter(Boolean);
     const velezLast2 = lastMatches.slice(0, 2);
 
-    // --- CÁLCULO EXCLUSIVO DEL TORNEO DE LIGA PARA VÉLEZ (PJ, GOLES, AMARILLAS, ROJAS Y VALLAS INVICTAS) ---
+    // --- CONTEO PARTIDO POR PARTIDO EXCLUSIVO DEL TORNEO ACTUAL (SIN APERTURA NI COPA ARGENTINA) ---
     const cleanSheetsByGkId = new Map();
     const playedMatchesByPlayerId = new Map();
     const velezGoalsByPlayerId = new Map();
     const velezYellowsByPlayerId = new Map();
     const velezRedsByPlayerId = new Map();
 
-    const activeSeasonTypeId = finished.find(e => e._isLpfTournament)?.seasonType?.id;
-    const lpfOnlyFinished = finished.filter(ev => {
-      if (!ev._isLpfTournament) return false;
-      if (activeSeasonTypeId && ev.seasonType?.id) {
-        return String(ev.seasonType.id) === String(activeSeasonTypeId);
-      }
-      return true;
-    }).slice(0, 20);
+    // Tomamos ÚNICAMENTE los últimos `exactClausuraMatchesCount` partidos finalizados de Primera División (arg.1)
+    const currentTournamentEvents = finished
+      .filter(ev => ev._isLpfTournament === true)
+      .slice(0, exactClausuraMatchesCount);
 
-    if (lpfOnlyFinished.length > 0) {
+    if (currentTournamentEvents.length > 0) {
       const summaries = await Promise.allSettled(
-        lpfOnlyFinished.map(ev => axios.get(`${ESPN_LPF}/summary?event=${ev.id}&region=ar&lang=es`))
+        currentTournamentEvents.map(ev => axios.get(`${ESPN_LPF}/summary?event=${ev.id}&region=ar&lang=es`))
       );
 
       summaries.forEach((resItem, idx) => {
         if (resItem.status !== 'fulfilled') return;
-        const ev = lpfOnlyFinished[idx];
+        const ev = currentTournamentEvents[idx];
         const parsedMatch = formatPastMatch(ev, velezId);
         if (!parsedMatch) return;
 
-        const rosters = resItem.value.data?.rosters || [];
+        const sumData = resItem.value.data || {};
+        const rosters = sumData.rosters || [];
         const velezRoster = rosters.find(r => String(r.team?.id) === velezId);
-        if (!velezRoster || !Array.isArray(velezRoster.roster)) return;
 
-        // Contabilizar estadísticas individuales obtenidas jugando para Vélez
-        velezRoster.roster.forEach(item => {
-          const athId = String(item.athlete?.id || '');
-          if (!athId) return;
-
-          const participated = item.starter === true || item.subbedIn === true;
-          if (participated) {
-            playedMatchesByPlayerId.set(athId, (playedMatchesByPlayerId.get(athId) || 0) + 1);
-          }
-
-          (item.plays || []).forEach(play => {
-            const pText = (play.type?.text || play.text || '').toLowerCase();
-            if (play.scoringPlay === true || pText.includes('goal') || pText.includes('gol')) {
-              if (!play.ownGoal && !pText.includes('own goal') && !pText.includes('en contra')) {
-                velezGoalsByPlayerId.set(athId, (velezGoalsByPlayerId.get(athId) || 0) + 1);
-              }
-            } else if (pText.includes('yellow') || pText.includes('amarilla')) {
-              velezYellowsByPlayerId.set(athId, (velezYellowsByPlayerId.get(athId) || 0) + 1);
-            } else if (pText.includes('red') || pText.includes('roja')) {
-              velezRedsByPlayerId.set(athId, (velezRedsByPlayerId.get(athId) || 0) + 1);
+        // 1. Sumar PJ de cada jugador que participó en este partido del torneo actual
+        if (velezRoster && Array.isArray(velezRoster.roster)) {
+          velezRoster.roster.forEach(item => {
+            const athId = String(item.athlete?.id || '');
+            if (!athId) return;
+            const participated = item.starter === true || item.subbedIn === true;
+            if (participated) {
+              playedMatchesByPlayerId.set(athId, (playedMatchesByPlayerId.get(athId) || 0) + 1);
             }
           });
-        });
 
-        // Vallas invictas de arqueros
-        const gksInMatch = velezRoster.roster.filter(item => {
-          const athId = String(item.athlete?.id || '');
-          const pos = mapPosition(item.position?.abbreviation, item.position?.displayName || item.position?.name);
-          const isGkRole = goalkeeperIdsSet.has(athId) || pos.group === 'ARQ';
-          const participated = item.starter === true || item.subbedIn === true;
-          return isGkRole && participated;
-        });
+          // Vallas invictas de arqueros
+          const gksInMatch = velezRoster.roster.filter(item => {
+            const athId = String(item.athlete?.id || '');
+            const pos = mapPosition(item.position?.abbreviation, item.position?.displayName || item.position?.name);
+            const isGkRole = goalkeeperIdsSet.has(athId) || pos.group === 'ARQ';
+            const participated = item.starter === true || item.subbedIn === true;
+            return isGkRole && participated;
+          });
 
-        const effectiveGks = gksInMatch.length > 0
-          ? gksInMatch
-          : velezRoster.roster.filter(item => {
-              const athId = String(item.athlete?.id || '');
-              const pos = mapPosition(item.position?.abbreviation, item.position?.displayName || item.position?.name);
-              return goalkeeperIdsSet.has(athId) || pos.group === 'ARQ';
-            }).slice(0, 1);
+          const effectiveGks = gksInMatch.length > 0
+            ? gksInMatch
+            : velezRoster.roster.filter(item => {
+                const athId = String(item.athlete?.id || '');
+                const pos = mapPosition(item.position?.abbreviation, item.position?.displayName || item.position?.name);
+                return goalkeeperIdsSet.has(athId) || pos.group === 'ARQ';
+              }).slice(0, 1);
 
-        effectiveGks.forEach(gk => {
-          const gkId = String(gk.athlete?.id || '');
-          if (!gkId) return;
-          if (!playedMatchesByPlayerId.has(gkId)) {
-            playedMatchesByPlayerId.set(gkId, 1);
+          effectiveGks.forEach(gk => {
+            const gkId = String(gk.athlete?.id || '');
+            if (!gkId) return;
+            if (!playedMatchesByPlayerId.has(gkId)) {
+              playedMatchesByPlayerId.set(gkId, 1);
+            }
+            if (parsedMatch.rawRivalGoalsValid && parsedMatch.rivalGoals === 0) {
+              cleanSheetsByGkId.set(gkId, (cleanSheetsByGkId.get(gkId) || 0) + 1);
+            }
+          });
+        }
+
+        // 2. Sumar Goles, Amarillas y Rojas desde keyEvents / details oficiales del partido
+        const matchEvents =
+          sumData.keyEvents ||
+          sumData.header?.competitions?.[0]?.details ||
+          ev.competitions?.[0]?.details ||
+          [];
+
+        matchEvents.forEach(ke => {
+          const eventTeamId = String(ke.team?.id || '');
+          if (eventTeamId && eventTeamId !== velezId) return;
+
+          const typeText = (ke.type?.text || ke.text || '').toLowerCase();
+          const participant = ke.participants?.[0]?.athlete || ke.athletesInvolved?.[0] || {};
+          let athId = String(participant.id || '');
+
+          if (!athId) {
+            const pNameNorm = normalizeStr(participant.displayName || participant.shortName || '');
+            if (pNameNorm && playerNameToIdMap.has(pNameNorm)) {
+              athId = playerNameToIdMap.get(pNameNorm);
+            }
           }
-          if (parsedMatch.rawRivalGoalsValid && parsedMatch.rivalGoals === 0) {
-            cleanSheetsByGkId.set(gkId, (cleanSheetsByGkId.get(gkId) || 0) + 1);
+          if (!athId) return;
+
+          const isGoal =
+            ke.scoringPlay === true ||
+            typeText.includes('goal') ||
+            typeText.includes('gol') ||
+            typeText.includes('penalty - scored') ||
+            typeText.includes('penal convertido');
+
+          const isOwnGoal = ke.ownGoal === true || typeText.includes('own goal') || typeText.includes('en contra');
+          const isYellow = typeText.includes('yellow card') || typeText.includes('tarjeta amarilla') || typeText.includes('amarilla');
+          const isRed = typeText.includes('red card') || typeText.includes('tarjeta roja') || typeText.includes('expuls');
+
+          if (isGoal && !isOwnGoal) {
+            velezGoalsByPlayerId.set(athId, (velezGoalsByPlayerId.get(athId) || 0) + 1);
+          } else if (isYellow) {
+            velezYellowsByPlayerId.set(athId, (velezYellowsByPlayerId.get(athId) || 0) + 1);
+          } else if (isRed) {
+            velezRedsByPlayerId.set(athId, (velezRedsByPlayerId.get(athId) || 0) + 1);
           }
         });
       });
@@ -643,7 +729,7 @@ app.get('/api/velez-data', async (req, res) => {
       }
     }
 
-    // --- PLANTEL CON BANDERA DE NACIONALIDAD Y MÉTRICAS EXCLUSIVAS EN VÉLEZ ---
+    // --- PLANTEL CON ESTADÍSTICAS 100 % EXCLUSIVAS DEL TORNEO ACTUAL ---
     const jerseyMap = new Map();
     if (teamInfoRes.status === 'fulfilled' && teamInfoRes.value.data?.team?.athletes) {
       teamInfoRes.value.data.team.athletes.forEach(a => {
@@ -663,45 +749,13 @@ app.get('/api/velez-data', async (req, res) => {
       squad = playerList.map(p => {
         const pIdStr = String(p.id);
         const posInfo = mapPosition(p.position?.abbreviation, p.position?.displayName || p.position?.name);
-        const splits = p.statistics?.splits?.categories || [];
 
-        const getStat = (names) => {
-          for (const cat of splits) {
-            for (const st of (cat.stats || [])) {
-              if (names.includes(st.name) || names.includes(st.abbreviation)) {
-                return Number(st.value) || 0;
-              }
-            }
-          }
-          return 0;
-        };
-
-        let pj = playedMatchesByPlayerId.has(pIdStr)
-          ? playedMatchesByPlayerId.get(pIdStr)
-          : getStat(['appearances', 'GP', 'subIns']);
-
-        let cleanSheets = null;
-        if (posInfo.group === 'ARQ') {
-          const lpfCs = cleanSheetsByGkId.get(pIdStr);
-          cleanSheets = lpfCs !== undefined ? lpfCs : getStat(['cleanSheets', 'CS']);
-        }
-
-        // Si el jugador tiene 0 partidos jugados con Vélez en el certamen, sus goles/tarjetas en Vélez son 0
-        const apiGoals = getStat(['totalGoals', 'G', 'goals']);
-        const apiYellows = getStat(['yellowCards', 'YC']);
-        const apiReds = getStat(['redCards', 'RC']);
-
-        const goalsInVelez = pj === 0
-          ? 0
-          : (velezGoalsByPlayerId.has(pIdStr) ? velezGoalsByPlayerId.get(pIdStr) : apiGoals);
-
-        const yellowsInVelez = pj === 0
-          ? 0
-          : (velezYellowsByPlayerId.has(pIdStr) ? velezYellowsByPlayerId.get(pIdStr) : apiYellows);
-
-        const redsInVelez = pj === 0
-          ? 0
-          : (velezRedsByPlayerId.has(pIdStr) ? velezRedsByPlayerId.get(pIdStr) : apiReds);
+        // Usamos exclusivamente el conteo extraído de los partidos jugados del torneo actual
+        const pj = playedMatchesByPlayerId.get(pIdStr) || 0;
+        const goalsInTournament = velezGoalsByPlayerId.get(pIdStr) || 0;
+        const yellowsInTournament = velezYellowsByPlayerId.get(pIdStr) || 0;
+        const redsInTournament = velezRedsByPlayerId.get(pIdStr) || 0;
+        const cleanSheets = posInfo.group === 'ARQ' ? (cleanSheetsByGkId.get(pIdStr) || 0) : null;
 
         const fullNameNorm = normalizeStr(p.displayName || p.fullName);
         const lastNameNorm = normalizeStr(p.lastName || fullNameNorm.split(' ').pop());
@@ -733,64 +787,12 @@ app.get('/api/velez-data', async (req, res) => {
           flagUrl: `https://flagcdn.com/w80/${countryInfo.code}.png`,
           photo: p.headshot?.href || velezLogoUrl,
           pj,
-          goals: goalsInVelez,
+          goals: goalsInTournament,
           cleanSheets,
-          yellowCards: yellowsInVelez,
-          redCards: redsInVelez
+          yellowCards: yellowsInTournament,
+          redCards: redsInTournament
         };
       });
-    }
-
-    // --- TABLAS ---
-    let standingsClausura = [];
-    let standingsAnual = [];
-
-    if (standingsRes.status === 'fulfilled' && standingsRes.value.data) {
-      const data = standingsRes.value.data;
-      const children = data.children || [];
-
-      if (children[0]?.standings?.entries) {
-        standingsClausura = parseStandingsEntries(children[0].standings.entries, velezId);
-      } else if (data.standings?.entries) {
-        standingsClausura = parseStandingsEntries(data.standings.entries, velezId);
-      }
-
-      const anualChild = children.find(c => {
-        const n = (c.name || c.abbreviation || '').toLowerCase();
-        return n.includes('anual') || n.includes('general') || n.includes('acumulad') || n.includes('overall') || (c.standings?.entries?.length >= 26);
-      });
-
-      if (anualChild?.standings?.entries) {
-        standingsAnual = parseStandingsEntries(anualChild.standings.entries, velezId);
-      } else if (children.length >= 2) {
-        const combinedMap = new Map();
-        children.forEach(ch => {
-          const parsed = parseStandingsEntries(ch.standings?.entries || [], velezId);
-          parsed.forEach(row => {
-            if (!combinedMap.has(row.name)) {
-              combinedMap.set(row.name, { ...row });
-            } else {
-              const ex = combinedMap.get(row.name);
-              ex.pj += row.pj;
-              ex.pg += row.pg;
-              ex.pe += row.pe;
-              ex.pp += row.pp;
-              ex.gf += row.gf;
-              ex.gc += row.gc;
-              ex.dg += row.dg;
-              ex.pts += row.pts;
-              if (!ex.cupType && row.cupType) {
-                ex.cupType = row.cupType;
-                ex.cupNote = row.cupNote;
-                ex.cupColor = row.cupColor;
-              }
-            }
-          });
-        });
-        standingsAnual = Array.from(combinedMap.values()).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
-      } else {
-        standingsAnual = [...standingsClausura];
-      }
     }
 
     const payload = {
