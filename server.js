@@ -166,7 +166,7 @@ function parseStandingsEntries(entries, velezId) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v9 activo. Usá /api/velez-data' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v10 activo (con estadísticas del último partido). Usá /api/velez-data' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
@@ -210,7 +210,6 @@ app.get('/api/velez-data', async (req, res) => {
 
     const velezWebJerseys = officialJerseys.status === 'fulfilled' ? officialJerseys.value : {};
 
-    // Detectar automáticamente el nombre del torneo actual desde la tabla de ESPN (ej. "Torneo Clausura 2026" o "Torneo Apertura 2027")
     let activeTournamentName = 'Torneo Clausura';
     if (standingsRes.status === 'fulfilled' && standingsRes.value.data) {
       const stData = standingsRes.value.data;
@@ -272,11 +271,10 @@ app.get('/api/velez-data', async (req, res) => {
     const lastMatches = finished.slice(0, 5).map(ev => formatPastMatch(ev, velezId)).filter(Boolean);
     const velezLast2 = lastMatches.slice(0, 2);
 
-    // --- CÁLCULO EXCLUSIVO DEL TORNEO DE LIGA (SIN COPA ARGENTINA) PARA ARQUEROS ---
+    // --- CÁLCULO EXCLUSIVO DEL TORNEO DE LIGA PARA ARQUEROS ---
     const cleanSheetsByGkId = new Map();
     const playedMatchesByGkId = new Map();
 
-    // Filtramos SOLO los partidos finalizados del torneo local en curso (arg.1 / fase regular)
     const activeSeasonTypeId = finished.find(e => e._isLpfTournament)?.seasonType?.id;
     const lpfOnlyFinished = finished.filter(ev => {
       if (!ev._isLpfTournament) return false;
@@ -348,11 +346,7 @@ app.get('/api/velez-data', async (req, res) => {
       };
     });
 
-    // --- LÓGICA DE PARTIDO PRINCIPAL:
-    // 1. Si hay partido EN VIVO -> LIVE
-    // 2. Si el último partido terminó hace menos de 24 horas -> FINISHED_24H (muestra resultado y goleadores por 24hs)
-    // 3. Si hay próximo partido confirmado -> NEXT
-    // 4. Si no hay próximo partido confirmado -> TBD (Vélez vs "A confirmar" con escudo gris)
+    // --- PARTIDO PRINCIPAL ---
     let currentMatch = null;
     let rivalLastMatches = [];
     let rivalLast2 = [];
@@ -484,7 +478,6 @@ app.get('/api/velez-data', async (req, res) => {
         }
       };
     } else {
-      // No hay partido en vivo, ni jugado en las últimas 24hs, ni próximo partido confirmado
       currentMatch = {
         type: 'TBD',
         timestamp: null,
@@ -503,7 +496,7 @@ app.get('/api/velez-data', async (req, res) => {
             away: {
               id: 0,
               name: 'A confirmar',
-              logo: '' // El frontend colocará el escudo genérico gris
+              logo: ''
             }
           },
           goals: { home: null, away: null },
@@ -521,17 +514,22 @@ app.get('/api/velez-data', async (req, res) => {
       };
     }
 
-    // --- ÚLTIMO 11 TITULAR REAL DE VÉLEZ ---
+    // --- ÚLTIMO 11 TITULAR Y ESTADÍSTICAS DEL ÚLTIMO PARTIDO (POSESIÓN Y TIROS) ---
     let lastLineup = { formation: '4-2-3-1', rival: '', date: '', starters: [] };
+    let lastMatchStats = null;
     const jerseyFromMatchMap = new Map();
 
     if (finished.length > 0) {
       const lastGame = finished[0];
       try {
-        const summaryRes = await axios.get(`${ESPN_LPF}/summary?event=${lastGame.id}&region=ar&lang=es`);
+        const isCopa = (lastGame.league?.slug || '').includes('copa');
+        const baseApi = isCopa ? ESPN_COPA : ESPN_LPF;
+        const summaryRes = await axios.get(`${baseApi}/summary?event=${lastGame.id}&region=ar&lang=es`);
         const rosters = summaryRes.data?.rosters || [];
         const velezRoster = rosters.find(r => String(r.team?.id) === velezId);
         const oppRoster = rosters.find(r => String(r.team?.id) !== velezId);
+        const rivalShortName = oppRoster?.team?.shortDisplayName || oppRoster?.team?.displayName || 'Rival';
+        const matchDateShort = new Date(lastGame.date).toLocaleDateString('es-AR', { day: '2-digit', month: 'short' });
 
         if (velezRoster && Array.isArray(velezRoster.roster)) {
           velezRoster.roster.forEach(item => {
@@ -543,8 +541,8 @@ app.get('/api/velez-data', async (req, res) => {
           const startersRaw = velezRoster.roster.filter(item => item.starter === true);
           lastLineup = {
             formation: velezRoster.formation || '4-2-3-1',
-            rival: oppRoster?.team?.shortDisplayName || oppRoster?.team?.displayName || '',
-            date: new Date(lastGame.date).toLocaleDateString('es-AR', { day: '2-digit', month: 'short' }),
+            rival: rivalShortName,
+            date: matchDateShort,
             starters: startersRaw.slice(0, 11).map(item => {
               const posInfo = mapPosition(item.position?.abbreviation, item.position?.displayName || item.position?.name);
               return {
@@ -561,12 +559,41 @@ app.get('/api/velez-data', async (req, res) => {
             })
           };
         }
+
+        // Extraer Posesión y Tiros del boxscore oficial del último partido
+        const boxTeams = summaryRes.data?.boxscore?.teams || [];
+        const velezBox = boxTeams.find(b => String(b.team?.id) === velezId);
+        const oppBox = boxTeams.find(b => String(b.team?.id) !== velezId);
+
+        if (velezBox && Array.isArray(velezBox.statistics)) {
+          const getBoxStat = (boxObj, statNames) => {
+            const st = (boxObj?.statistics || []).find(s => statNames.includes(s.name) || statNames.includes(s.label));
+            return st && st.displayValue !== undefined ? parseFloat(String(st.displayValue).replace('%', '')) : null;
+          };
+
+          const possession = getBoxStat(velezBox, ['possessionPct', 'possession', 'Posesión']);
+          const totalShots = getBoxStat(velezBox, ['totalShots', 'shots', 'Tiros totales']);
+          const shotsOnTarget = getBoxStat(velezBox, ['shotsOnTarget', 'shotsOnGoal', 'Tiros al arco']);
+          const shotsOffTarget = (totalShots !== null && shotsOnTarget !== null)
+            ? Math.max(0, totalShots - shotsOnTarget)
+            : null;
+
+          lastMatchStats = {
+            rival: rivalShortName,
+            date: matchDateShort,
+            possession,
+            oppPossession: oppBox ? getBoxStat(oppBox, ['possessionPct', 'possession', 'Posesión']) : null,
+            totalShots,
+            shotsOnTarget,
+            shotsOffTarget
+          };
+        }
       } catch (err) {
-        console.warn('No se pudo obtener la formación del último partido:', err.message);
+        console.warn('No se pudo obtener la formación/estadísticas del último partido:', err.message);
       }
     }
 
-    // --- PLANTEL (ESTADÍSTICAS EXCLUSIVAS DEL TORNEO ACTUAL) ---
+    // --- PLANTEL ---
     const jerseyMap = new Map();
     if (teamInfoRes.status === 'fulfilled' && teamInfoRes.value.data?.team?.athletes) {
       teamInfoRes.value.data.team.athletes.forEach(a => {
@@ -606,7 +633,6 @@ app.get('/api/velez-data', async (req, res) => {
           const lpfPj = playedMatchesByGkId.get(gkIdStr);
           const lpfCs = cleanSheetsByGkId.get(gkIdStr);
 
-          // Usar exclusivamente los partidos jugados y vallas invictas del torneo local en curso
           pj = lpfPj !== undefined ? lpfPj : pj;
           cleanSheets = lpfCs !== undefined ? lpfCs : getStat(['cleanSheets', 'CS']);
         }
@@ -706,6 +732,7 @@ app.get('/api/velez-data', async (req, res) => {
       upcomingMatches,
       squad,
       lastLineup,
+      lastMatchStats,
       standingsClausura,
       standingsAnual
     };
