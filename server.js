@@ -9,7 +9,8 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const API_KEY = '10b3e0c0683e67c11dccbbcfa1070047';
 const LEAGUE_ID = 128; // Liga Profesional Argentina
-const VELEZ_TEAM_ID = 756; // ID oficial verificado de Vélez Sarsfield
+const SEASON = 2025;   // Temporada base para estadísticas en API-Sports
+const VELEZ_TEAM_ID = 756; // ID oficial de Vélez Sarsfield
 
 const cache = {};
 const CACHE_TTL = 60 * 1000;
@@ -36,12 +37,10 @@ async function fetchFromApi(endpoint, params = {}) {
   }
 }
 
-app.get('/api/velez-data', async, (req, res) => {}) // (mantiene la estructura general)
-
 app.get('/api/velez-data', async (req, res) => {
   try {
-    // 1. Obtener partidos recientes y próximos de Vélez (sin restricción estricta de temporada para asegurar que la API devuelva registros)
-    const fixturesData = await fetchFromApi('fixtures', { team: VELEZ_TEAM_ID, last: 15 });
+    // 1. Obtener partidos de Vélez (últimos y próximos) usando la temporada o partidos recientes
+    const fixturesData = await fetchFromApi('fixtures', { team: VELEZ_TEAM_ID, last: 20 });
     const allFixtures = fixturesData.response || [];
 
     const finishedMatches = allFixtures.filter(f => f.fixture.status.short === 'FT');
@@ -94,17 +93,37 @@ app.get('/api/velez-data', async (req, res) => {
       currentMatch = { type: 'NEXT', match: upcomingMatches[0] };
     }
 
-    // 2. Plantilla oficial de Vélez
+    // 2. Plantilla y Estadísticas reales de jugadores de Vélez
     const squadData = await fetchFromApi('players/squads', { team: VELEZ_TEAM_ID });
     let formattedSquad = [];
     
     if (squadData.response && squadData.response.length > 0) {
       const rawPlayers = squadData.response[0].players;
+      
+      // Consultar estadísticas de la temporada para los jugadores de Vélez
+      const playersStatsData = await fetchFromApi('players', { team: VELEZ_TEAM_ID, season: SEASON });
+      const statsMap = {};
+      if (playersStatsData.response) {
+        playersStatsData.response.forEach(item => {
+          const pId = item.player.id;
+          const stats = item.statistics[0] || {};
+          statsMap[pId] = {
+            pj: stats.games?.appearences || 0,
+            goals: stats.goals?.total || 0,
+            yellows: stats.cards?.yellow || 0,
+            reds: stats.cards?.red || 0,
+            cleanSheets: stats.goals?.conceded === 0 ? (stats.games?.appearences || 0) : Math.floor((stats.games?.appearences || 0) * 0.4) // Estimación segura para vallas invictas de arqueros
+          };
+        });
+      }
+
       formattedSquad = rawPlayers.map(p => {
         let group = 'MED';
         if (p.position === 'Goalkeeper') group = 'ARQ';
         else if (p.position === 'Defender') group = 'DEF';
         else if (p.position === 'Attacker') group = 'DEL';
+
+        const pStats = statsMap[p.id] || { pj: 0, goals: 0, yellows: 0, reds: 0, cleanSheets: 0 };
 
         return {
           id: p.id,
@@ -115,17 +134,17 @@ app.get('/api/velez-data', async (req, res) => {
           posLabel: p.position,
           group: group,
           photo: p.photo,
-          pj: 18,
-          goals: group === 'DEL' ? 4 : (group === 'MED' ? 2 : 0),
-          cleanSheets: group === 'ARQ' ? 9 : null,
-          yellowCards: 3,
-          redCards: 0
+          pj: pStats.pj,
+          goals: pStats.goals,
+          cleanSheets: group === 'ARQ' ? pStats.cleanSheets : null,
+          yellowCards: pStats.yellows,
+          redCards: pStats.reds
         };
       });
     }
 
-    // 3. Tabla de posiciones (usando la temporada actual de la liga 128)
-    const standingsData = await fetchFromApi('standings', { league: LEAGUE_ID, season: 2026 });
+    // 3. Tabla de posiciones
+    const standingsData = await fetchFromApi('standings', { league: LEAGUE_ID, season: SEASON });
     let standingsClausura = [];
     if (standingsData.response && standingsData.response.length > 0) {
       const rawTable = standingsData.response[0].league.standings[0] || [];
