@@ -118,7 +118,6 @@ function parseStandingsEntries(entries, velezId) {
     const pj = findExactStat('gamesPlayed');
     const pts = findExactStat('points');
 
-    // Leer clasificación a copas directamente desde entry.note de ESPN
     const noteDesc = entry.note?.description || '';
     const noteLower = noteDesc.toLowerCase();
     let cupType = null;
@@ -152,7 +151,7 @@ function parseStandingsEntries(entries, velezId) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v6 activo (con clasificación a Copas y goleadores en vivo). Usá /api/velez-data' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v7 activo (vallas invictas exactas por arquero). Usá /api/velez-data' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
@@ -235,10 +234,46 @@ app.get('/api/velez-data', async (req, res) => {
     const lastMatches = finished.slice(0, 5).map(ev => formatPastMatch(ev, velezId)).filter(Boolean);
     const velezLast2 = lastMatches.slice(0, 2);
 
-    const totalCleanSheetsSeason = finished.filter(ev => {
+    // --- CÁLCULO REAL DE VALLAS INVICTAS POR ARQUERO (Partido por partido donde rivalGoals === 0) ---
+    const cleanSheetsByGoalkeeperId = new Map();
+    const cleanSheetEvents = finished.filter(ev => {
       const m = formatPastMatch(ev, velezId);
       return m && m.rivalGoals === 0;
-    }).length;
+    });
+
+    if (cleanSheetEvents.length > 0) {
+      const csSummaries = await Promise.allSettled(
+        cleanSheetEvents.map(ev => {
+          const isCopa = (ev.league?.slug || '').includes('copa') || (ev.league?.shortName || '').toLowerCase().includes('copa');
+          const baseApi = isCopa ? ESPN_COPA : ESPN_LPF;
+          return axios.get(`${baseApi}/summary?event=${ev.id}&region=ar&lang=es`);
+        })
+      );
+
+      csSummaries.forEach(resItem => {
+        if (resItem.status !== 'fulfilled') return;
+        const rosters = resItem.value.data?.rosters || [];
+        const velezRoster = rosters.find(r => String(r.team?.id) === velezId);
+        if (!velezRoster || !Array.isArray(velezRoster.roster)) return;
+
+        // Buscar el arquero que jugó ese partido sin recibir goles (titular o ingresado sin goles en contra)
+        const gks = velezRoster.roster.filter(item => {
+          const abbr = (item.position?.abbreviation || '').toUpperCase();
+          return abbr === 'G' || abbr === 'GK';
+        });
+
+        // Priorizar el titular; si hubo cambio y no recibieron goles, ambos mantuvieron su valla invicta en sus minutos
+        const activeGks = gks.filter(g => g.starter === true || g.subbedIn === true);
+        const targetGks = activeGks.length > 0 ? activeGks : gks.slice(0, 1);
+
+        targetGks.forEach(gk => {
+          const gkId = String(gk.athlete?.id || '');
+          if (gkId) {
+            cleanSheetsByGoalkeeperId.set(gkId, (cleanSheetsByGoalkeeperId.get(gkId) || 0) + 1);
+          }
+        });
+      });
+    }
 
     const upcomingMatches = upcoming.slice(0, 4).map(ev => {
       const comp = ev.competitions[0];
@@ -260,7 +295,7 @@ app.get('/api/velez-data', async (req, res) => {
       };
     });
 
-    // --- PRÓXIMO PARTIDO, MARCADOR EN VIVO Y GOLEADORES MINUTO A MINUTO ---
+    // --- PRÓXIMO PARTIDO, MARCADOR EN VIVO Y GOLEADORES ---
     let currentMatch = null;
     let rivalLastMatches = [];
     let rivalLast2 = [];
@@ -458,12 +493,15 @@ app.get('/api/velez-data', async (req, res) => {
         };
 
         const pj = getStat(['appearances', 'GP', 'subIns']);
-        const goalsConceded = getStat(['goalsConceded', 'GA']);
         let cleanSheets = null;
 
         if (posInfo.group === 'ARQ') {
           const apiCS = getStat(['cleanSheets', 'CS']);
-          cleanSheets = apiCS > 0 ? apiCS : (pj > 0 ? Math.min(pj, totalCleanSheetsSeason || Math.max(0, pj - goalsConceded)) : 0);
+          const matchCalculatedCS = cleanSheetsByGoalkeeperId.get(String(p.id)) || 0;
+          // Prioridad al cálculo real por partido atajado con 0 goles en contra; si no, el dato nativo de ESPN (nunca mayor a sus PJ)
+          cleanSheets = matchCalculatedCS > 0
+            ? Math.min(pj || matchCalculatedCS, matchCalculatedCS)
+            : Math.min(pj, apiCS);
         }
 
         const fullNameNorm = normalizeStr(p.displayName || p.fullName);
