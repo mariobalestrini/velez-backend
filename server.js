@@ -10,11 +10,15 @@ const PORT = process.env.PORT || 3000;
 
 const ESPN_LPF = 'https://site.api.espn.com/apis/site/v2/sports/soccer/arg.1';
 const ESPN_COPA = 'https://site.api.espn.com/apis/site/v2/sports/soccer/arg.copa';
-const ESPN_WEB_LPF = 'https://site.web.api.espn.com/apis/v2/sports/soccer/arg.1';
+const ESPN_WEB_LPF = 'https://site.web.api.espn.com/apis/site/v2/sports/soccer/arg.1';
 
 let cacheData = null;
 let cacheTime = 0;
 let inflightRequest = null;
+
+let fixtureCacheData = null;
+let fixtureCacheTime = 0;
+let inflightFixtureRequest = null;
 
 function normalizeStr(str) {
   return (str || '')
@@ -442,7 +446,6 @@ async function computeVelezPayload(now) {
   finished.sort((a, b) => new Date(b.date) - new Date(a.date));
   upcoming.sort((a, b) => new Date(a.date) - new Date(b.date));
 
-  // --- REGLAS DE TRANSICIÓN DE TORNEO ---
   const isDec31 = curMonth === 12 && curDay === 31;
   const isPreSeasonWindow = (curMonth === 1 && curDay <= 25) || isDec31;
 
@@ -491,7 +494,6 @@ async function computeVelezPayload(now) {
   const lastMatches = finished.slice(0, 5).map(ev => formatPastMatch(ev, velezId)).filter(Boolean);
   const velezLast2 = lastMatches.slice(0, 2);
 
-  // --- CONTEO PARTIDO POR PARTIDO EXCLUSIVO DEL TORNEO ACTUAL (SOLO PARTIDOS FINALIZADOS) ---
   const cleanSheetsByGkId = new Map();
   const playedMatchesByPlayerId = new Map();
   const velezGoalsByPlayerId = new Map();
@@ -624,7 +626,6 @@ async function computeVelezPayload(now) {
     };
   });
 
-  // --- PARTIDO PRINCIPAL (INCLUYE TARJETAS AMARILLAS, ROJAS Y POSESIÓN EN VIVO) ---
   let currentMatch = null;
   let rivalLastMatches = [];
   let rivalLast2 = [];
@@ -843,7 +844,6 @@ async function computeVelezPayload(now) {
     };
   }
 
-  // --- FORMACIONES DE LOS ÚLTIMOS 5 PARTIDOS Y ESTADÍSTICAS ---
   const recentLineups = [];
   let lastMatchStats = null;
   const jerseyFromMatchMap = new Map();
@@ -946,7 +946,6 @@ async function computeVelezPayload(now) {
 
   const lastLineup = recentLineups[0] || { formation: '4-2-3-1', rival: '', date: '', starters: [] };
 
-  // --- PLANTEL CON ESTADÍSTICAS DEL TORNEO ACTUAL (PARTIDOS FINALIZADOS) ---
   const jerseyMap = new Map();
   if (teamInfoRes.status === 'fulfilled' && teamInfoRes.value.data?.team?.athletes) {
     teamInfoRes.value.data.team.athletes.forEach(a => {
@@ -1033,8 +1032,161 @@ async function computeVelezPayload(now) {
   };
 }
 
+async function computeVelezTournamentFixture(now) {
+  const teamsRes = await axios.get(`${ESPN_LPF}/teams?region=ar&lang=es`);
+  const allTeams = teamsRes.data?.sports?.[0]?.leagues?.[0]?.teams || [];
+  const velezEntry = allTeams.find(t => {
+    const name = (t.team?.displayName || t.team?.name || '').toLowerCase();
+    return name.includes('vélez') || name.includes('velez');
+  });
+
+  if (!velezEntry) {
+    throw new Error('No se encontró a Vélez en ESPN arg.1');
+  }
+  const velezId = String(velezEntry.team.id);
+
+  const [schedPastRes, schedFutureLpfRes, schedFutureCopaRes, standingsRes] = await Promise.allSettled([
+    axios.get(`${ESPN_LPF}/teams/${velezId}/schedule?region=ar&lang=es`),
+    axios.get(`${ESPN_LPF}/teams/${velezId}/schedule?fixture=true&region=ar&lang=es`),
+    axios.get(`${ESPN_COPA}/teams/${velezId}/schedule?region=ar&lang=es`),
+    axios.get(`${ESPN_WEB_LPF}/standings?region=ar&lang=es`)
+  ]);
+
+  let tournamentName = 'Torneo Clausura';
+  if (standingsRes.status === 'fulfilled' && standingsRes.value.data) {
+    const rawTourney = standingsRes.value.data.children?.[0]?.name || standingsRes.value.data.name || '';
+    if (rawTourney) tournamentName = rawTourney;
+  }
+
+  const eventMap = new Map();
+  const addEvs = (arr) => {
+    (arr || []).forEach(ev => {
+      if (ev && ev.id && ev.competitions?.[0]) {
+        eventMap.set(String(ev.id), ev);
+      }
+    });
+  };
+
+  if (schedPastRes.status === 'fulfilled') addEvs(schedPastRes.value.data?.events);
+  if (schedFutureLpfRes.status === 'fulfilled') addEvs(schedFutureLpfRes.value.data?.events);
+  if (schedFutureCopaRes.status === 'fulfilled') addEvs(schedFutureCopaRes.value.data?.events);
+
+  const sortedEvents = Array.from(eventMap.values()).sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  const matches = await Promise.all(
+    sortedEvents.map(async (ev) => {
+      const comp = ev.competitions[0];
+      const state = comp.status?.type?.state || 'pre';
+      const completed = comp.status?.type?.completed === true || state === 'post';
+      const isLive = state === 'in';
+      const status = completed ? 'FINISHED' : (isLive ? 'LIVE' : 'UPCOMING');
+
+      const competitors = comp.competitors || [];
+      const homeC = competitors.find(c => c.homeAway === 'home');
+      const awayC = competitors.find(c => c.homeAway === 'away');
+      const homeTeamId = String(homeC?.team?.id || homeC?.id || '');
+      const awayTeamId = String(awayC?.team?.id || awayC?.id || '');
+      const isVelezHome = homeTeamId === velezId || String(homeC?.id) === velezId;
+
+      const homeGoals = status === 'UPCOMING' ? null : (extractScoreNumber(homeC?.score) || 0);
+      const awayGoals = status === 'UPCOMING' ? null : (extractScoreNumber(awayC?.score) || 0);
+
+      const scorers = { home: [], away: [] };
+      let possession = null;
+
+      if (status === 'FINISHED' || status === 'LIVE') {
+        let rawDetails = comp.details || [];
+        try {
+          const isCopa = (ev.league?.slug || '').includes('copa');
+          const baseApi = isCopa ? ESPN_COPA : ESPN_LPF;
+          const sumRes = await axios.get(`${baseApi}/summary?event=${ev.id}&region=ar&lang=es`, { timeout: 6500 });
+          const sumData = sumRes.data || {};
+          const sumDetails = sumData.keyEvents || sumData.header?.competitions?.[0]?.details || [];
+          if (sumDetails.length > 0) rawDetails = sumDetails;
+
+          const boxTeams = sumData.boxscore?.teams || [];
+          const getPoss = (boxObj) => {
+            const st = (boxObj?.statistics || []).find(s =>
+              ['possessionPct', 'possession', 'Posesión', 'Possession'].includes(s.name) ||
+              ['possessionPct', 'possession', 'Posesión', 'Possession'].includes(s.label)
+            );
+            if (!st || st.displayValue === undefined) return null;
+            const n = parseFloat(String(st.displayValue).replace('%', ''));
+            return isNaN(n) ? null : Math.round(n);
+          };
+
+          const hPoss = getPoss(boxTeams.find(b => String(b.team?.id) === homeTeamId));
+          const aPoss = getPoss(boxTeams.find(b => String(b.team?.id) === awayTeamId));
+          if (hPoss !== null || aPoss !== null) {
+            const safeH = hPoss !== null ? hPoss : (100 - aPoss);
+            const safeA = aPoss !== null ? aPoss : (100 - safeH);
+            possession = { home: safeH, away: safeA };
+          }
+        } catch (e) {
+          // Si falla el summary individual, conserva lo disponible en details
+        }
+
+        rawDetails.forEach(d => {
+          const typeText = (d.type?.text || d.text || '').toLowerCase();
+          const isGoal =
+            d.scoringPlay === true ||
+            typeText.includes('goal') ||
+            typeText.includes('gol') ||
+            typeText.includes('penalty - scored') ||
+            typeText.includes('penal convertido');
+          if (!isGoal) return;
+
+          const clock = d.clock?.displayValue || '';
+          const participant = d.participants?.[0]?.athlete || d.AthletesInvolved?.[0] || {};
+          const playerName = participant.shortName || participant.displayName || d.shortText?.split(' ')[0] || 'Gol';
+          const isOwnGoal = d.ownGoal === true || typeText.includes('own goal') || typeText.includes('en contra');
+          const isPenalty = d.penaltyKick === true || typeText.includes('penal') || typeText.includes('penalty');
+
+          let suffix = '';
+          if (isOwnGoal) suffix = ' (EC)';
+          else if (isPenalty) suffix = ' (P)';
+
+          const label = `${playerName} ${clock}${suffix}`.trim();
+          const scoringTeamId = String(d.team?.id || '');
+          if (scoringTeamId === homeTeamId) scorers.home.push(label);
+          else if (scoringTeamId === awayTeamId) scorers.away.push(label);
+        });
+      }
+
+      const d = new Date(ev.date);
+      return {
+        id: String(ev.id),
+        status,
+        isoDate: d.toISOString(),
+        timestamp: d.getTime(),
+        round: ev.seasonType?.abbreviation || comp.status?.type?.shortDetail || 'Fecha',
+        comp: ev.league?.shortName || ev.league?.name || tournamentName,
+        stadium: comp.venue?.fullName || (isVelezHome ? 'Estadio José Amalfitani' : 'Estadio a confirmar'),
+        cond: isVelezHome ? 'L' : 'V',
+        home: {
+          name: homeC?.team?.shortDisplayName || homeC?.team?.displayName || 'Local',
+          logo: getTeamLogo(homeC?.team),
+          goals: homeGoals
+        },
+        away: {
+          name: awayC?.team?.shortDisplayName || awayC?.team?.displayName || 'Visitante',
+          logo: getTeamLogo(awayC?.team),
+          goals: awayGoals
+        },
+        scorers,
+        possession
+      };
+    })
+  );
+
+  return {
+    tournamentName,
+    matches
+  };
+}
+
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v23 activo (posesión y tarjetas en vivo). Usá /api/velez-data' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v24 activo. Endpoints: /api/velez-data y /api/velez-fixture' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
@@ -1075,6 +1227,41 @@ app.get('/api/velez-data', async (req, res) => {
     });
   } finally {
     inflightRequest = null;
+  }
+});
+
+app.get('/api/velez-fixture', async (req, res) => {
+  const now = Date.now();
+  const ttl = 45 * 1000;
+
+  if (fixtureCacheData && (now - fixtureCacheTime < ttl)) {
+    return res.json(fixtureCacheData);
+  }
+
+  if (inflightFixtureRequest) {
+    try {
+      const shared = await inflightFixtureRequest;
+      return res.json(shared);
+    } catch (err) {
+      if (fixtureCacheData) return res.json(fixtureCacheData);
+    }
+  }
+
+  inflightFixtureRequest = (async () => {
+    const payload = await computeVelezTournamentFixture(Date.now());
+    fixtureCacheData = payload;
+    fixtureCacheTime = Date.now();
+    return payload;
+  })();
+
+  try {
+    const data = await inflightFixtureRequest;
+    res.json(data);
+  } catch (error) {
+    if (fixtureCacheData) return res.json(fixtureCacheData);
+    res.status(500).json({ error: 'Error obteniendo fixture', mensaje: error.message });
+  } finally {
+    inflightFixtureRequest = null;
   }
 });
 
