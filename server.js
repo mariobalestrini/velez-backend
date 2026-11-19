@@ -1033,6 +1033,8 @@ async function computeVelezPayload(now) {
 }
 
 async function computeVelezTournamentFixture(now) {
+  const { year: curYear } = getArgentinaNowParts(now);
+
   const teamsRes = await axios.get(`${ESPN_LPF}/teams?region=ar&lang=es`);
   const allTeams = teamsRes.data?.sports?.[0]?.leagues?.[0]?.teams || [];
   const velezEntry = allTeams.find(t => {
@@ -1045,18 +1047,35 @@ async function computeVelezTournamentFixture(now) {
   }
   const velezId = String(velezEntry.team.id);
 
-  const [schedPastRes, schedFutureLpfRes, schedFutureCopaRes, standingsRes] = await Promise.allSettled([
+  const [schedPastRes, schedFutureLpfRes, standingsRes] = await Promise.allSettled([
     axios.get(`${ESPN_LPF}/teams/${velezId}/schedule?region=ar&lang=es`),
     axios.get(`${ESPN_LPF}/teams/${velezId}/schedule?fixture=true&region=ar&lang=es`),
-    axios.get(`${ESPN_COPA}/teams/${velezId}/schedule?region=ar&lang=es`),
     axios.get(`${ESPN_WEB_LPF}/standings?region=ar&lang=es`)
   ]);
 
   let tournamentName = 'Torneo Clausura';
+  let velezPlayedInTournament = 0;
+
   if (standingsRes.status === 'fulfilled' && standingsRes.value.data) {
-    const rawTourney = standingsRes.value.data.children?.[0]?.name || standingsRes.value.data.name || '';
+    const data = standingsRes.value.data;
+    const children = data.children || [];
+    const rawTourney = children[0]?.name || data.name || '';
     if (rawTourney) tournamentName = rawTourney;
+
+    const allEntries = children.flatMap(ch => ch.standings?.entries || []);
+    const velezRow = allEntries.find(e => String(e.team?.id) === velezId);
+    if (velezRow) {
+      const pjStat = (velezRow.stats || []).find(s => s.name === 'gamesPlayed' || s.type === 'gamesPlayed');
+      if (pjStat && pjStat.value !== undefined) {
+        velezPlayedInTournament = Number(pjStat.value) || 0;
+      }
+    }
   }
+
+  const tourneyNorm = normalizeStr(tournamentName);
+  const seasonKeyword = tourneyNorm.includes('apertura')
+    ? 'apertura'
+    : (tourneyNorm.includes('clausura') ? 'clausura' : '');
 
   const eventMap = new Map();
   const addEvs = (arr) => {
@@ -1069,12 +1088,38 @@ async function computeVelezTournamentFixture(now) {
 
   if (schedPastRes.status === 'fulfilled') addEvs(schedPastRes.value.data?.events);
   if (schedFutureLpfRes.status === 'fulfilled') addEvs(schedFutureLpfRes.value.data?.events);
-  if (schedFutureCopaRes.status === 'fulfilled') addEvs(schedFutureCopaRes.value.data?.events);
 
-  const sortedEvents = Array.from(eventMap.values()).sort((a, b) => new Date(a.date) - new Date(b.date));
+  const tournamentEvents = Array.from(eventMap.values()).filter(ev => {
+    const comp = ev.competitions?.[0];
+    if (!comp) return false;
+
+    const evYear = getArgentinaNowParts(new Date(ev.date).getTime()).year;
+    if (evYear !== curYear) return false;
+
+    const leagueSlug = normalizeStr(ev.league?.slug || comp.league?.slug || '');
+    if (leagueSlug && leagueSlug !== 'arg1' && leagueSlug !== 'arg 1') {
+      return false;
+    }
+
+    const metaText = normalizeStr(
+      `${ev.season?.name || ''} ${ev.seasonType?.name || ''} ${ev.seasonType?.abbreviation || ''} ${comp.type?.text || ''} ${comp.notes?.[0]?.headline || ''}`
+    );
+
+    if (metaText.includes('amistoso') || metaText.includes('friendly')) {
+      return false;
+    }
+
+    if (seasonKeyword && metaText.includes(seasonKeyword)) {
+      return true;
+    }
+
+    return !metaText.includes('apertura') && !metaText.includes('clausura');
+  });
+
+  tournamentEvents.sort((a, b) => new Date(b.date) - new Date(a.date));
 
   const matches = await Promise.all(
-    sortedEvents.map(async (ev) => {
+    tournamentEvents.map(async (ev) => {
       const comp = ev.competitions[0];
       const state = comp.status?.type?.state || 'pre';
       const completed = comp.status?.type?.completed === true || state === 'post';
@@ -1097,9 +1142,7 @@ async function computeVelezTournamentFixture(now) {
       if (status === 'FINISHED' || status === 'LIVE') {
         let rawDetails = comp.details || [];
         try {
-          const isCopa = (ev.league?.slug || '').includes('copa');
-          const baseApi = isCopa ? ESPN_COPA : ESPN_LPF;
-          const sumRes = await axios.get(`${baseApi}/summary?event=${ev.id}&region=ar&lang=es`, { timeout: 6500 });
+          const sumRes = await axios.get(`${ESPN_LPF}/summary?event=${ev.id}&region=ar&lang=es`, { timeout: 6500 });
           const sumData = sumRes.data || {};
           const sumDetails = sumData.keyEvents || sumData.header?.competitions?.[0]?.details || [];
           if (sumDetails.length > 0) rawDetails = sumDetails;
@@ -1160,7 +1203,7 @@ async function computeVelezTournamentFixture(now) {
         isoDate: d.toISOString(),
         timestamp: d.getTime(),
         round: ev.seasonType?.abbreviation || comp.status?.type?.shortDetail || 'Fecha',
-        comp: ev.league?.shortName || ev.league?.name || tournamentName,
+        comp: tournamentName,
         stadium: comp.venue?.fullName || (isVelezHome ? 'Estadio José Amalfitani' : 'Estadio a confirmar'),
         cond: isVelezHome ? 'L' : 'V',
         home: {
@@ -1181,12 +1224,13 @@ async function computeVelezTournamentFixture(now) {
 
   return {
     tournamentName,
+    playedCount: velezPlayedInTournament,
     matches
   };
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v24 activo. Endpoints: /api/velez-data y /api/velez-fixture' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v25 activo. Endpoints: /api/velez-data y /api/velez-fixture' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
