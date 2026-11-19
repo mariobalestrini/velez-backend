@@ -198,7 +198,6 @@ function parseStandingsEntries(entries, velezId) {
   return rows;
 }
 
-// Calcula la Tabla Anual (Apertura + Clausura) sumando todos los partidos de Primera División del año en curso por equipo
 async function buildAnnualStandingsFromTeamSchedules(allTeams, curYear, velezId) {
   const results = await Promise.allSettled(
     allTeams.map(async (tObj) => {
@@ -492,7 +491,7 @@ async function computeVelezPayload(now) {
   const lastMatches = finished.slice(0, 5).map(ev => formatPastMatch(ev, velezId)).filter(Boolean);
   const velezLast2 = lastMatches.slice(0, 2);
 
-  // --- CONTEO PARTIDO POR PARTIDO EXCLUSIVO DEL TORNEO ACTUAL ---
+  // --- CONTEO PARTIDO POR PARTIDO EXCLUSIVO DEL TORNEO ACTUAL (SOLO PARTIDOS FINALIZADOS) ---
   const cleanSheetsByGkId = new Map();
   const playedMatchesByPlayerId = new Map();
   const velezGoalsByPlayerId = new Map();
@@ -623,7 +622,7 @@ async function computeVelezPayload(now) {
     };
   });
 
-  // --- PARTIDO PRINCIPAL ---
+  // --- PARTIDO PRINCIPAL (INCLUYE TARJETAS AMARILLAS Y ROJAS EN VIVO DEL PARTIDO EN CURSO) ---
   let currentMatch = null;
   let rivalLastMatches = [];
   let rivalLast2 = [];
@@ -660,23 +659,34 @@ async function computeVelezPayload(now) {
     }
 
     const scorers = { home: [], away: [] };
+    const liveCards = {
+      home: { yellow: [], red: [] },
+      away: { yellow: [], red: [] }
+    };
     let rawDetails = comp.details || [];
 
-    if ((liveEvent || isWithin24HoursPostMatch) && rawDetails.length === 0) {
+    if ((liveEvent || isWithin24HoursPostMatch)) {
       try {
         const isCopa = (targetEv.league?.slug || '').includes('copa');
         const baseApi = isCopa ? ESPN_COPA : ESPN_LPF;
-        const summaryEv = summaryCacheByEventId.has(String(targetEv.id))
+        const summaryEv = (!liveEvent && summaryCacheByEventId.has(String(targetEv.id)))
           ? { data: summaryCacheByEventId.get(String(targetEv.id)) }
           : await axios.get(`${baseApi}/summary?event=${targetEv.id}&region=ar&lang=es`);
-        rawDetails = summaryEv.data?.keyEvents || summaryEv.data?.header?.competitions?.[0]?.details || [];
+        const summaryDetails = summaryEv.data?.keyEvents || summaryEv.data?.header?.competitions?.[0]?.details || [];
+        if (summaryDetails.length > 0) rawDetails = summaryDetails;
       } catch (e) {
-        rawDetails = [];
+        // Mantener rawDetails si falla el summary
       }
     }
 
     rawDetails.forEach(d => {
       const typeText = (d.type?.text || d.text || '').toLowerCase();
+      const clock = d.clock?.displayValue || '';
+      const participant = d.participants?.[0]?.athlete || d.AthletesInvolved?.[0] || {};
+      const playerName = participant.shortName || participant.displayName || d.shortText?.split(' ')[0] || '';
+      const evTeamId = String(d.team?.id || '');
+      const side = evTeamId === homeTeamId ? 'home' : (evTeamId === awayTeamId ? 'away' : null);
+
       const isGoal =
         d.scoringPlay === true ||
         typeText.includes('goal') ||
@@ -684,25 +694,34 @@ async function computeVelezPayload(now) {
         typeText.includes('penalty - scored') ||
         typeText.includes('penal convertido');
 
-      if (!isGoal) return;
+      const isYellow =
+        typeText.includes('yellow card') ||
+        typeText.includes('tarjeta amarilla') ||
+        typeText.includes('amarilla');
 
-      const clock = d.clock?.displayValue || '';
-      const participant = d.participants?.[0]?.athlete || d.AthletesInvolved?.[0] || {};
-      const playerName = participant.shortName || participant.displayName || d.shortText?.split(' ')[0] || 'Gol';
-      const isOwnGoal = d.ownGoal === true || typeText.includes('own goal') || typeText.includes('en contra');
-      const isPenalty = d.penaltyKick === true || typeText.includes('penal') || typeText.includes('penalty');
+      const isRed =
+        typeText.includes('red card') ||
+        typeText.includes('tarjeta roja') ||
+        typeText.includes('expuls');
 
-      let suffix = '';
-      if (isOwnGoal) suffix = ' (EC)';
-      else if (isPenalty) suffix = ' (P)';
+      if (isGoal) {
+        const safePlayer = playerName || 'Gol';
+        const isOwnGoal = d.ownGoal === true || typeText.includes('own goal') || typeText.includes('en contra');
+        const isPenalty = d.penaltyKick === true || typeText.includes('penal') || typeText.includes('penalty');
 
-      const label = `${playerName} ${clock}${suffix}`.trim();
-      const scoringTeamId = String(d.team?.id || '');
+        let suffix = '';
+        if (isOwnGoal) suffix = ' (EC)';
+        else if (isPenalty) suffix = ' (P)';
 
-      if (scoringTeamId === homeTeamId) {
-        scorers.home.push(label);
-      } else if (scoringTeamId === awayTeamId) {
-        scorers.away.push(label);
+        const label = `${safePlayer} ${clock}${suffix}`.trim();
+        if (side === 'home') scorers.home.push(label);
+        else if (side === 'away') scorers.away.push(label);
+      } else if (isYellow && side) {
+        const label = `${playerName || 'Jugador'} ${clock}`.trim();
+        liveCards[side].yellow.push(label);
+      } else if (isRed && side) {
+        const label = `${playerName || 'Jugador'} ${clock}`.trim();
+        liveCards[side].red.push(label);
       }
     });
 
@@ -739,6 +758,7 @@ async function computeVelezPayload(now) {
           away: extractScoreNumber(awayC?.score) || 0
         },
         scorers,
+        cards: liveCards,
         fixture: {
           date: isoDateStrict,
           timestamp: Math.floor(timestampMs / 1000),
@@ -780,6 +800,7 @@ async function computeVelezPayload(now) {
         },
         goals: { home: null, away: null },
         scorers: { home: [], away: [] },
+        cards: { home: { yellow: [], red: [] }, away: { yellow: [], red: [] } },
         fixture: {
           date: null,
           venue: { name: 'A confirmar' },
@@ -896,7 +917,7 @@ async function computeVelezPayload(now) {
 
   const lastLineup = recentLineups[0] || { formation: '4-2-3-1', rival: '', date: '', starters: [] };
 
-  // --- PLANTEL CON ESTADÍSTICAS DEL TORNEO ACTUAL ---
+  // --- PLANTEL CON ESTADÍSTICAS DEL TORNEO ACTUAL (PARTIDOS FINALIZADOS) ---
   const jerseyMap = new Map();
   if (teamInfoRes.status === 'fulfilled' && teamInfoRes.value.data?.team?.athletes) {
     teamInfoRes.value.data.team.athletes.forEach(a => {
@@ -984,7 +1005,7 @@ async function computeVelezPayload(now) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v21 activo (caché en RAM con TTL 10s en vivo / 60s fuera de partido y anti-concurrencia). Usá /api/velez-data' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v22 activo (tarjetas amarillas y rojas en vivo del partido en curso). Usá /api/velez-data' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
