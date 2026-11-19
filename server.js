@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 
 const ESPN_LPF = 'https://site.api.espn.com/apis/site/v2/sports/soccer/arg.1';
 const ESPN_COPA = 'https://site.api.espn.com/apis/site/v2/sports/soccer/arg.copa';
-const ESPN_WEB_LPF = 'https://site.web.api.espn.com/apis/v2/sports/soccer/arg.1';
+const ESPN_WEB_LPF = 'https://site.web.api.espn.com/apis/site/v2/sports/soccer/arg.1';
 
 let cacheData = null;
 let cacheTime = 0;
@@ -202,57 +202,39 @@ function parseStandingsEntries(entries, velezId) {
   return rows;
 }
 
-async function buildGroupStandingsFromTeamSchedules(allTeams, curYear, velezId, seasonKeyword = '') {
-  const groupAIds = new Set();
-  const groupBIds = new Set();
+async function buildGroupStandingsDynamically(allTeams, curYear, velezId, seasonKeyword = '') {
+  const kwNorm = normalizeStr(seasonKeyword);
+  const validTeamIds = new Set(allTeams.map(t => String(t.team?.id || '')).filter(Boolean));
+  const rowById = new Map();
+  const matchupsByTeam = new Map();
 
-  // Semillas conocidas de cada zona para separar los grupos de fase regular cuando ESPN no expone children
   allTeams.forEach(tObj => {
-    const id = String(tObj.team?.id || '');
-    const n = normalizeStr(tObj.team?.displayName || tObj.team?.name || '');
-    if (!id) return;
-    if (
-      n.includes('velez') || n.includes('boca') || n.includes('independiente') ||
-      n.includes('san lorenzo') || n.includes('estudiantes') || n.includes('defensa') ||
-      n.includes('lanus') || n.includes('union') || n.includes('newells') ||
-      n.includes('platense') || n.includes('instituto') || n.includes('talleres') ||
-      n.includes('riestra') || n.includes('central cordoba') || n.includes('gimnasia (m)') ||
-      n.includes('gimnasia m')
-    ) {
-      groupAIds.add(id);
-    } else {
-      groupBIds.add(id);
-    }
+    const teamId = String(tObj.team?.id || '');
+    if (!teamId) return;
+    rowById.set(teamId, {
+      id: teamId,
+      name: tObj.team?.shortDisplayName || tObj.team?.displayName || tObj.team?.name || 'Equipo',
+      logo: getTeamLogo(tObj.team),
+      isVelez: teamId === String(velezId),
+      pj: 0,
+      pg: 0,
+      pe: 0,
+      pp: 0,
+      gf: 0,
+      gc: 0,
+      dg: 0,
+      pts: 0,
+      cupType: null,
+      cupNote: '',
+      cupColor: null
+    });
+    matchupsByTeam.set(teamId, new Map());
   });
 
-  const kwNorm = normalizeStr(seasonKeyword);
-
-  const results = await Promise.allSettled(
+  await Promise.allSettled(
     allTeams.map(async (tObj) => {
       const teamId = String(tObj.team?.id || '');
-      const teamName = tObj.team?.shortDisplayName || tObj.team?.displayName || tObj.team?.name || 'Equipo';
-      const teamLogo = getTeamLogo(tObj.team);
-
-      const row = {
-        id: teamId,
-        name: teamName,
-        logo: teamLogo,
-        isVelez: teamId === String(velezId),
-        pj: 0,
-        pg: 0,
-        pe: 0,
-        pp: 0,
-        gf: 0,
-        gc: 0,
-        dg: 0,
-        pts: 0,
-        cupType: null,
-        cupNote: '',
-        cupColor: null
-      };
-
-      if (!teamId) return row;
-
+      if (!teamId) return;
       try {
         const schedRes = await axios.get(`${ESPN_LPF}/teams/${teamId}/schedule?region=ar&lang=es`, { timeout: 7000 });
         const events = schedRes.data?.events || [];
@@ -294,13 +276,17 @@ async function buildGroupStandingsFromTeamSchedules(allTeams, curYear, velezId, 
           if (!me || !opp) return;
 
           const oppId = String(opp.id || opp.team?.id || '');
-          // En el formato de zonas, los partidos interzonales entre Grupo A y Grupo B no suman a la tabla de zona
-          if (groupAIds.has(teamId) && groupBIds.has(oppId)) return;
-          if (groupBIds.has(teamId) && groupAIds.has(oppId)) return;
+          if (!validTeamIds.has(oppId)) return;
 
           const myGoals = extractScoreNumber(me.score);
           const oppGoals = extractScoreNumber(opp.score);
           if (isNaN(myGoals) || isNaN(oppGoals)) return;
+
+          const mMap = matchupsByTeam.get(teamId);
+          if (mMap) mMap.set(oppId, (mMap.get(oppId) || 0) + 1);
+
+          const row = rowById.get(teamId);
+          if (!row) return;
 
           row.pj += 1;
           row.gf += myGoals;
@@ -318,16 +304,69 @@ async function buildGroupStandingsFromTeamSchedules(allTeams, curYear, velezId, 
           }
         });
       } catch (err) {
-        console.warn(`Error leyendo schedule de zona de ${teamName}:`, err.message);
+        console.warn(`Error leyendo schedule de ${teamId}:`, err.message);
       }
-
-      return row;
     })
   );
 
-  const allRows = results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
-  const grupoA = allRows.filter(r => groupAIds.has(r.id)).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
-  const grupoB = allRows.filter(r => groupBIds.has(r.id)).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
+  // Detectar de forma dinámica los dos grupos mediante partidos mutuos en la zona
+  const visited = new Set();
+  const clusters = [];
+
+  Array.from(validTeamIds).forEach(id => {
+    if (visited.has(id)) return;
+    const queue = [id];
+    const compSet = new Set();
+    visited.add(id);
+
+    while (queue.length > 0) {
+      const curr = queue.shift();
+      compSet.add(curr);
+      const currMap = matchupsByTeam.get(curr) || new Map();
+
+      currMap.forEach((cnt, otherId) => {
+        if (!validTeamIds.has(otherId) || visited.has(otherId)) return;
+        const otherMap = matchupsByTeam.get(otherId) || new Map();
+        // Si ambos registraron el cruce mutuo en la fase regular, pertenecen a la misma zona
+        if (cnt > 0 && (otherMap.get(curr) || 0) > 0) {
+          visited.add(otherId);
+          queue.push(otherId);
+        }
+      });
+    }
+
+    clusters.push(Array.from(compSet));
+  });
+
+  clusters.sort((a, b) => b.length - a.length);
+
+  let setA = new Set(clusters[0] || []);
+  let setB = new Set(clusters[1] || []);
+
+  // Si algún equipo quedó suelto, asignarlo al cluster con el que tenga más cruces mutuos
+  const assignedAll = new Set([...setA, ...setB]);
+  Array.from(validTeamIds).forEach(id => {
+    if (assignedAll.has(id)) return;
+    const mMap = matchupsByTeam.get(id) || new Map();
+    let scoreA = 0;
+    let scoreB = 0;
+    mMap.forEach((cnt, oppId) => {
+      if (setA.has(oppId)) scoreA += cnt;
+      if (setB.has(oppId)) scoreB += cnt;
+    });
+    if (scoreA >= scoreB) setA.add(id);
+    else setB.add(id);
+  });
+
+  // Asegurar que Grupo A sea el grupo donde está Vélez si es posible
+  if (setB.has(String(velezId)) && !setA.has(String(velezId))) {
+    const tmp = setA;
+    setA = setB;
+    setB = tmp;
+  }
+
+  const grupoA = Array.from(setA).map(id => rowById.get(id)).filter(Boolean).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
+  const grupoB = Array.from(setB).map(id => rowById.get(id)).filter(Boolean).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
 
   return { grupoA, grupoB };
 }
@@ -463,8 +502,6 @@ async function computeVelezPayload(now) {
     teamInfoRes,
     rosterRes,
     standingsRes,
-    standingsAnualComputed,
-    groupStandingsFallback,
     officialJerseys
   ] = await Promise.allSettled([
     axios.get(`${ESPN_LPF}/teams/${velezId}/schedule?region=ar&lang=es`),
@@ -473,8 +510,6 @@ async function computeVelezPayload(now) {
     axios.get(`${ESPN_LPF}/teams/${velezId}?enable=roster&region=ar&lang=es`),
     axios.get(`${ESPN_LPF}/teams/${velezId}/roster?region=ar&lang=es`),
     axios.get(`${ESPN_WEB_LPF}/standings?region=ar&lang=es`),
-    buildAnnualStandingsFromTeamSchedules(allTeams, curYear, velezId),
-    buildGroupStandingsFromTeamSchedules(allTeams, curYear, velezId, 'clausura'),
     fetchOfficialVelezJerseys()
   ]);
 
@@ -519,7 +554,16 @@ async function computeVelezPayload(now) {
     }
   }
 
-  // Respaldo automático de Grupo A y Grupo B si ESPN no devuelve los grupos en playoffs/octavos
+  const tourneyNorm = normalizeStr(activeTournamentName);
+  const seasonKw = tourneyNorm.includes('apertura') ? 'apertura' : (tourneyNorm.includes('clausura') ? 'clausura' : '');
+
+  const [standingsAnualComputed, groupStandingsFallback] = await Promise.allSettled([
+    buildAnnualStandingsFromTeamSchedules(allTeams, curYear, velezId),
+    (standingsGrupoA.length === 0 || standingsGrupoB.length === 0)
+      ? buildGroupStandingsDynamically(allTeams, curYear, velezId, seasonKw)
+      : Promise.resolve(null)
+  ]);
+
   if (groupStandingsFallback.status === 'fulfilled' && groupStandingsFallback.value) {
     if (standingsGrupoA.length === 0 && groupStandingsFallback.value.grupoA?.length > 0) {
       standingsGrupoA = groupStandingsFallback.value.grupoA;
@@ -1377,7 +1421,7 @@ async function computeVelezTournamentFixture(now) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v26 activo. Endpoints: /api/velez-data y /api/velez-fixture' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v27 activo. Endpoints: /api/velez-data y /api/velez-fixture' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
