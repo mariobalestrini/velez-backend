@@ -613,6 +613,8 @@ async function computeVelezPayload(now) {
     return {
       fecha: ev.seasonType?.abbreviation || 'PRÓXIMO',
       comp: ev.league?.shortName || 'Liga Profesional',
+      isoDate: d.toISOString(),
+      timestamp: d.getTime(),
       date: d.toLocaleDateString('es-AR', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'America/Argentina/Buenos_Aires' }),
       timeART: d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Argentina/Buenos_Aires' }) + ' ART',
       rival: rival?.team?.shortDisplayName || rival?.team?.displayName || 'Rival',
@@ -622,7 +624,7 @@ async function computeVelezPayload(now) {
     };
   });
 
-  // --- PARTIDO PRINCIPAL (INCLUYE TARJETAS AMARILLAS Y ROJAS EN VIVO DEL PARTIDO EN CURSO) ---
+  // --- PARTIDO PRINCIPAL (INCLUYE TARJETAS AMARILLAS, ROJAS Y POSESIÓN EN VIVO) ---
   let currentMatch = null;
   let rivalLastMatches = [];
   let rivalLast2 = [];
@@ -663,6 +665,7 @@ async function computeVelezPayload(now) {
       home: { yellow: [], red: [] },
       away: { yellow: [], red: [] }
     };
+    let livePossession = null;
     let rawDetails = comp.details || [];
 
     if ((liveEvent || isWithin24HoursPostMatch)) {
@@ -674,8 +677,32 @@ async function computeVelezPayload(now) {
           : await axios.get(`${baseApi}/summary?event=${targetEv.id}&region=ar&lang=es`);
         const summaryDetails = summaryEv.data?.keyEvents || summaryEv.data?.header?.competitions?.[0]?.details || [];
         if (summaryDetails.length > 0) rawDetails = summaryDetails;
+
+        if (liveEvent) {
+          const boxTeams = summaryEv.data?.boxscore?.teams || [];
+          const getPoss = (boxObj) => {
+            const st = (boxObj?.statistics || []).find(s =>
+              ['possessionPct', 'possession', 'Posesión', 'Possession'].includes(s.name) ||
+              ['possessionPct', 'possession', 'Posesión', 'Possession'].includes(s.label)
+            );
+            if (!st || st.displayValue === undefined) return null;
+            const parsedNum = parseFloat(String(st.displayValue).replace('%', ''));
+            return isNaN(parsedNum) ? null : Math.round(parsedNum);
+          };
+
+          const homeBox = boxTeams.find(b => String(b.team?.id) === homeTeamId);
+          const awayBox = boxTeams.find(b => String(b.team?.id) === awayTeamId);
+          const hPoss = getPoss(homeBox);
+          const aPoss = getPoss(awayBox);
+
+          if (hPoss !== null || aPoss !== null) {
+            const safeH = hPoss !== null ? hPoss : (100 - aPoss);
+            const safeA = aPoss !== null ? aPoss : (100 - safeH);
+            livePossession = { home: safeH, away: safeA };
+          }
+        }
       } catch (e) {
-        // Mantener rawDetails si falla el summary
+        // Mantener rawDetails y livePossession en null si falla el summary
       }
     }
 
@@ -759,6 +786,7 @@ async function computeVelezPayload(now) {
         },
         scorers,
         cards: liveCards,
+        possession: livePossession,
         fixture: {
           date: isoDateStrict,
           timestamp: Math.floor(timestampMs / 1000),
@@ -801,6 +829,7 @@ async function computeVelezPayload(now) {
         goals: { home: null, away: null },
         scorers: { home: [], away: [] },
         cards: { home: { yellow: [], red: [] }, away: { yellow: [], red: [] } },
+        possession: null,
         fixture: {
           date: null,
           venue: { name: 'A confirmar' },
@@ -1005,7 +1034,7 @@ async function computeVelezPayload(now) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v22 activo (tarjetas amarillas y rojas en vivo del partido en curso). Usá /api/velez-data' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v23 activo (posesión y tarjetas en vivo). Usá /api/velez-data' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
