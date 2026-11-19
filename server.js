@@ -197,7 +197,7 @@ function parseStandingsEntries(entries, velezId) {
   return rows;
 }
 
-// Calcula la Tabla Anual 2026 (Apertura + Clausura) sumando todos los partidos de Primera División del año en curso por equipo
+// Calcula la Tabla Anual (Apertura + Clausura) sumando todos los partidos de Primera División del año en curso por equipo
 async function buildAnnualStandingsFromTeamSchedules(allTeams, curYear, velezId) {
   const results = await Promise.allSettled(
     allTeams.map(async (tObj) => {
@@ -239,11 +239,9 @@ async function buildAnnualStandingsFromTeamSchedules(allTeams, curYear, velezId)
           const isCompleted = comp.status?.type?.completed === true || comp.status?.type?.state === 'post';
           if (!isCompleted) return;
 
-          // Filtrar solo partidos del año en curso (ej. 2026)
           const evYear = getArgentinaNowParts(new Date(ev.date).getTime()).year;
           if (evYear !== curYear) return;
 
-          // Excluir instancias de mata-mata / playoffs si aparecieran en el schedule
           const roundText = normalizeStr(
             `${ev.seasonType?.name || ''} ${ev.seasonType?.abbreviation || ''} ${comp.status?.type?.shortDetail || ''}`
           );
@@ -282,7 +280,6 @@ async function buildAnnualStandingsFromTeamSchedules(allTeams, curYear, velezId)
             row.pts += 1;
           }
 
-          // Leer nota de clasificación a copas si ESPN la incluye en el competidor o evento
           const noteText = me.note?.description || comp.notes?.[0]?.headline || '';
           const noteLower = noteText.toLowerCase();
           if (!row.cupType && noteLower.includes('libertadores')) {
@@ -310,7 +307,7 @@ async function buildAnnualStandingsFromTeamSchedules(allTeams, curYear, velezId)
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v19 activo (Tabla Anual 30 equipos Apertura + Clausura). Usá /api/velez-data' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v20 activo (Grupo A, Grupo B y Tabla Anual). Usá /api/velez-data' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
@@ -359,6 +356,10 @@ app.get('/api/velez-data', async (req, res) => {
     const velezWebJerseys = officialJerseys.status === 'fulfilled' ? officialJerseys.value : {};
 
     let standingsClausura = [];
+    let standingsGrupoA = [];
+    let standingsGrupoB = [];
+    let grupoAName = 'Grupo A';
+    let grupoBName = 'Grupo B';
     let standingsAnual = [];
     let activeTournamentName = 'Torneo Clausura';
 
@@ -370,16 +371,26 @@ app.get('/api/velez-data', async (req, res) => {
         activeTournamentName = rawTourneyName;
       }
 
+      if (children[0]?.standings?.entries) {
+        standingsGrupoA = parseStandingsEntries(children[0].standings.entries, velezId);
+        if (children[0].name) grupoAName = children[0].name;
+      }
+      if (children[1]?.standings?.entries) {
+        standingsGrupoB = parseStandingsEntries(children[1].standings.entries, velezId);
+        if (children[1].name) grupoBName = children[1].name;
+      }
+
       const velezZoneChild = children.find(ch =>
         (ch.standings?.entries || []).some(e => String(e.team?.id) === velezId)
       );
 
       if (velezZoneChild?.standings?.entries) {
         standingsClausura = parseStandingsEntries(velezZoneChild.standings.entries, velezId);
-      } else if (children[0]?.standings?.entries) {
-        standingsClausura = parseStandingsEntries(children[0].standings.entries, velezId);
+      } else if (standingsGrupoA.length > 0) {
+        standingsClausura = standingsGrupoA;
       } else if (data.standings?.entries) {
         standingsClausura = parseStandingsEntries(data.standings.entries, velezId);
+        standingsGrupoA = standingsClausura;
       }
     }
 
@@ -462,12 +473,16 @@ app.get('/api/velez-data', async (req, res) => {
     const velezTableRow = standingsClausura.find(t => t.isVelez);
     let exactTournamentMatchesCount = velezTableRow && velezTableRow.pj > 0 ? velezTableRow.pj : 16;
 
+    const resetRows = (arr) => arr.map(t => ({
+      ...t, pj: 0, pg: 0, pe: 0, pp: 0, gf: 0, gc: 0, dg: 0, pts: 0
+    }));
+
     if (isDec31) {
       activeTournamentName = `Torneo Apertura ${curYear + 1}`;
       exactTournamentMatchesCount = 0;
-      standingsClausura = standingsClausura.map(t => ({
-        ...t, pj: 0, pg: 0, pe: 0, pp: 0, gf: 0, gc: 0, dg: 0, pts: 0
-      }));
+      standingsClausura = resetRows(standingsClausura);
+      standingsGrupoA = resetRows(standingsGrupoA);
+      standingsGrupoB = resetRows(standingsGrupoB);
       standingsAnual = standingsAnual.map(t => ({
         ...t, pj: 0, pg: 0, pe: 0, pp: 0, gf: 0, gc: 0, dg: 0, pts: 0, cupType: null, cupNote: ''
       }));
@@ -477,9 +492,9 @@ app.get('/api/velez-data', async (req, res) => {
     } else if (isMidYearTransitionAfter7Days) {
       activeTournamentName = `Torneo Clausura ${curYear}`;
       exactTournamentMatchesCount = 0;
-      standingsClausura = standingsClausura.map(t => ({
-        ...t, pj: 0, pg: 0, pe: 0, pp: 0, gf: 0, gc: 0, dg: 0, pts: 0
-      }));
+      standingsClausura = resetRows(standingsClausura);
+      standingsGrupoA = resetRows(standingsGrupoA);
+      standingsGrupoB = resetRows(standingsGrupoB);
     } else if (velezTableRow && velezTableRow.pj === 0) {
       exactTournamentMatchesCount = 0;
     }
@@ -959,6 +974,8 @@ app.get('/api/velez-data', async (req, res) => {
     const payload = {
       velezEspnIdDetectado: velezId,
       activeTournamentName,
+      grupoAName,
+      grupoBName,
       currentMatch,
       lastMatches,
       velezLast2,
@@ -970,6 +987,8 @@ app.get('/api/velez-data', async (req, res) => {
       recentLineups,
       lastMatchStats,
       standingsClausura,
+      standingsGrupoA,
+      standingsGrupoB,
       standingsAnual
     };
 
