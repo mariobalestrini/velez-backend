@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 
 const ESPN_LPF = 'https://site.api.espn.com/apis/site/v2/sports/soccer/arg.1';
 const ESPN_COPA = 'https://site.api.espn.com/apis/site/v2/sports/soccer/arg.copa';
-const ESPN_WEB_LPF = 'https://site.web.api.espn.com/apis/site/v2/sports/soccer/arg.1';
+const ESPN_WEB_LPF = 'https://site.web.api.espn.com/apis/v2/sports/soccer/arg.1';
 
 let cacheData = null;
 let cacheTime = 0;
@@ -202,6 +202,136 @@ function parseStandingsEntries(entries, velezId) {
   return rows;
 }
 
+async function buildGroupStandingsFromTeamSchedules(allTeams, curYear, velezId, seasonKeyword = '') {
+  const groupAIds = new Set();
+  const groupBIds = new Set();
+
+  // Semillas conocidas de cada zona para separar los grupos de fase regular cuando ESPN no expone children
+  allTeams.forEach(tObj => {
+    const id = String(tObj.team?.id || '');
+    const n = normalizeStr(tObj.team?.displayName || tObj.team?.name || '');
+    if (!id) return;
+    if (
+      n.includes('velez') || n.includes('boca') || n.includes('independiente') ||
+      n.includes('san lorenzo') || n.includes('estudiantes') || n.includes('defensa') ||
+      n.includes('lanus') || n.includes('union') || n.includes('newells') ||
+      n.includes('platense') || n.includes('instituto') || n.includes('talleres') ||
+      n.includes('riestra') || n.includes('central cordoba') || n.includes('gimnasia (m)') ||
+      n.includes('gimnasia m')
+    ) {
+      groupAIds.add(id);
+    } else {
+      groupBIds.add(id);
+    }
+  });
+
+  const kwNorm = normalizeStr(seasonKeyword);
+
+  const results = await Promise.allSettled(
+    allTeams.map(async (tObj) => {
+      const teamId = String(tObj.team?.id || '');
+      const teamName = tObj.team?.shortDisplayName || tObj.team?.displayName || tObj.team?.name || 'Equipo';
+      const teamLogo = getTeamLogo(tObj.team);
+
+      const row = {
+        id: teamId,
+        name: teamName,
+        logo: teamLogo,
+        isVelez: teamId === String(velezId),
+        pj: 0,
+        pg: 0,
+        pe: 0,
+        pp: 0,
+        gf: 0,
+        gc: 0,
+        dg: 0,
+        pts: 0,
+        cupType: null,
+        cupNote: '',
+        cupColor: null
+      };
+
+      if (!teamId) return row;
+
+      try {
+        const schedRes = await axios.get(`${ESPN_LPF}/teams/${teamId}/schedule?region=ar&lang=es`, { timeout: 7000 });
+        const events = schedRes.data?.events || [];
+        const seenEventIds = new Set();
+
+        events.forEach(ev => {
+          if (!ev?.id || seenEventIds.has(String(ev.id))) return;
+          seenEventIds.add(String(ev.id));
+
+          const comp = ev.competitions?.[0];
+          if (!comp) return;
+          const isCompleted = comp.status?.type?.completed === true || comp.status?.type?.state === 'post';
+          if (!isCompleted) return;
+
+          const evYear = getArgentinaNowParts(new Date(ev.date).getTime()).year;
+          if (evYear !== curYear) return;
+
+          const roundText = normalizeStr(
+            `${ev.seasonType?.name || ''} ${ev.seasonType?.abbreviation || ''} ${comp.status?.type?.shortDetail || ''} ${comp.notes?.[0]?.headline || ''}`
+          );
+
+          if (
+            roundText.includes('octavos') ||
+            roundText.includes('cuartos') ||
+            roundText.includes('semi') ||
+            roundText.includes('final') ||
+            roundText.includes('playoff') ||
+            roundText.includes('desempate')
+          ) {
+            return;
+          }
+
+          if (kwNorm && roundText.includes('apertura') && kwNorm.includes('clausura')) return;
+          if (kwNorm && roundText.includes('clausura') && kwNorm.includes('apertura')) return;
+
+          const competitors = comp.competitors || [];
+          const me = competitors.find(c => String(c.id) === teamId || String(c.team?.id) === teamId);
+          const opp = competitors.find(c => String(c.id) !== teamId && String(c.team?.id) !== teamId);
+          if (!me || !opp) return;
+
+          const oppId = String(opp.id || opp.team?.id || '');
+          // En el formato de zonas, los partidos interzonales entre Grupo A y Grupo B no suman a la tabla de zona
+          if (groupAIds.has(teamId) && groupBIds.has(oppId)) return;
+          if (groupBIds.has(teamId) && groupAIds.has(oppId)) return;
+
+          const myGoals = extractScoreNumber(me.score);
+          const oppGoals = extractScoreNumber(opp.score);
+          if (isNaN(myGoals) || isNaN(oppGoals)) return;
+
+          row.pj += 1;
+          row.gf += myGoals;
+          row.gc += oppGoals;
+          row.dg = row.gf - row.gc;
+
+          if (myGoals > oppGoals) {
+            row.pg += 1;
+            row.pts += 3;
+          } else if (myGoals < oppGoals) {
+            row.pp += 1;
+          } else {
+            row.pe += 1;
+            row.pts += 1;
+          }
+        });
+      } catch (err) {
+        console.warn(`Error leyendo schedule de zona de ${teamName}:`, err.message);
+      }
+
+      return row;
+    })
+  );
+
+  const allRows = results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
+  const grupoA = allRows.filter(r => groupAIds.has(r.id)).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
+  const grupoB = allRows.filter(r => groupBIds.has(r.id)).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
+
+  return { grupoA, grupoB };
+}
+
 async function buildAnnualStandingsFromTeamSchedules(allTeams, curYear, velezId) {
   const results = await Promise.allSettled(
     allTeams.map(async (tObj) => {
@@ -334,6 +464,7 @@ async function computeVelezPayload(now) {
     rosterRes,
     standingsRes,
     standingsAnualComputed,
+    groupStandingsFallback,
     officialJerseys
   ] = await Promise.allSettled([
     axios.get(`${ESPN_LPF}/teams/${velezId}/schedule?region=ar&lang=es`),
@@ -343,6 +474,7 @@ async function computeVelezPayload(now) {
     axios.get(`${ESPN_LPF}/teams/${velezId}/roster?region=ar&lang=es`),
     axios.get(`${ESPN_WEB_LPF}/standings?region=ar&lang=es`),
     buildAnnualStandingsFromTeamSchedules(allTeams, curYear, velezId),
+    buildGroupStandingsFromTeamSchedules(allTeams, curYear, velezId, 'clausura'),
     fetchOfficialVelezJerseys()
   ]);
 
@@ -384,6 +516,21 @@ async function computeVelezPayload(now) {
     } else if (data.standings?.entries) {
       standingsClausura = parseStandingsEntries(data.standings.entries, velezId);
       standingsGrupoA = standingsClausura;
+    }
+  }
+
+  // Respaldo automático de Grupo A y Grupo B si ESPN no devuelve los grupos en playoffs/octavos
+  if (groupStandingsFallback.status === 'fulfilled' && groupStandingsFallback.value) {
+    if (standingsGrupoA.length === 0 && groupStandingsFallback.value.grupoA?.length > 0) {
+      standingsGrupoA = groupStandingsFallback.value.grupoA;
+    }
+    if (standingsGrupoB.length === 0 && groupStandingsFallback.value.grupoB?.length > 0) {
+      standingsGrupoB = groupStandingsFallback.value.grupoB;
+    }
+    if (standingsClausura.length === 0) {
+      const inA = standingsGrupoA.find(t => t.isVelez);
+      const inB = standingsGrupoB.find(t => t.isVelez);
+      standingsClausura = inA ? standingsGrupoA : (inB ? standingsGrupoB : standingsGrupoA);
     }
   }
 
@@ -1230,7 +1377,7 @@ async function computeVelezTournamentFixture(now) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v25 activo. Endpoints: /api/velez-data y /api/velez-fixture' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v26 activo. Endpoints: /api/velez-data y /api/velez-fixture' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
