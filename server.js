@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 
 const ESPN_LPF = 'https://site.api.espn.com/apis/site/v2/sports/soccer/arg.1';
 const ESPN_COPA = 'https://site.api.espn.com/apis/site/v2/sports/soccer/arg.copa';
-const ESPN_WEB_LPF = 'https://site.web.api.espn.com/apis/site/v2/sports/soccer/arg.1';
+const ESPN_WEB_LPF = 'https://site.web.api.espn.com/apis/v2/sports/soccer/arg.1';
 
 let cacheData = null;
 let cacheTime = 0;
@@ -204,7 +204,8 @@ function parseStandingsEntries(entries, velezId) {
 
 async function buildGroupStandingsDynamically(allTeams, curYear, velezId, seasonKeyword = '') {
   const kwNorm = normalizeStr(seasonKeyword);
-  const validTeamIds = new Set(allTeams.map(t => String(t.team?.id || '')).filter(Boolean));
+  const validTeamIds = allTeams.map(t => String(t.team?.id || '')).filter(Boolean);
+  const validSet = new Set(validTeamIds);
   const rowById = new Map();
   const matchupsByTeam = new Map();
 
@@ -253,7 +254,7 @@ async function buildGroupStandingsDynamically(allTeams, curYear, velezId, season
           if (evYear !== curYear) return;
 
           const roundText = normalizeStr(
-            `${ev.seasonType?.name || ''} ${ev.seasonType?.abbreviation || ''} ${comp.status?.type?.shortDetail || ''} ${comp.notes?.[0]?.headline || ''}`
+            `${ev.season?.name || ''} ${ev.seasonType?.name || ''} ${ev.seasonType?.abbreviation || ''} ${comp.status?.type?.shortDetail || ''} ${comp.notes?.[0]?.headline || ''}`
           );
 
           if (
@@ -267,8 +268,8 @@ async function buildGroupStandingsDynamically(allTeams, curYear, velezId, season
             return;
           }
 
-          if (kwNorm && roundText.includes('apertura') && kwNorm.includes('clausura')) return;
-          if (kwNorm && roundText.includes('clausura') && kwNorm.includes('apertura')) return;
+          if (kwNorm.includes('clausura') && roundText.includes('apertura')) return;
+          if (kwNorm.includes('apertura') && roundText.includes('clausura')) return;
 
           const competitors = comp.competitors || [];
           const me = competitors.find(c => String(c.id) === teamId || String(c.team?.id) === teamId);
@@ -276,7 +277,7 @@ async function buildGroupStandingsDynamically(allTeams, curYear, velezId, season
           if (!me || !opp) return;
 
           const oppId = String(opp.id || opp.team?.id || '');
-          if (!validTeamIds.has(oppId)) return;
+          if (!validSet.has(oppId)) return;
 
           const myGoals = extractScoreNumber(me.score);
           const oppGoals = extractScoreNumber(opp.score);
@@ -309,56 +310,62 @@ async function buildGroupStandingsDynamically(allTeams, curYear, velezId, season
     })
   );
 
-  // Detectar de forma dinámica los dos grupos mediante partidos mutuos en la zona
-  const visited = new Set();
-  const clusters = [];
+  // Particionar dinámicamente los 30 equipos en 2 grupos de 15 minimizando cruces interzonales (Kernighan-Lin)
+  const half = Math.floor(validTeamIds.length / 2);
+  let setA = new Set(validTeamIds.slice(0, half));
+  let setB = new Set(validTeamIds.slice(half));
 
-  Array.from(validTeamIds).forEach(id => {
-    if (visited.has(id)) return;
-    const queue = [id];
-    const compSet = new Set();
-    visited.add(id);
+  const getWeight = (u, v) => {
+    const w1 = matchupsByTeam.get(u)?.get(v) || 0;
+    const w2 = matchupsByTeam.get(v)?.get(u) || 0;
+    return w1 + w2;
+  };
 
-    while (queue.length > 0) {
-      const curr = queue.shift();
-      compSet.add(curr);
-      const currMap = matchupsByTeam.get(curr) || new Map();
+  let improved = true;
+  let guard = 0;
+  while (improved && guard < 50) {
+    improved = false;
+    guard++;
+    const arrA = Array.from(setA);
+    const arrB = Array.from(setB);
 
-      currMap.forEach((cnt, otherId) => {
-        if (!validTeamIds.has(otherId) || visited.has(otherId)) return;
-        const otherMap = matchupsByTeam.get(otherId) || new Map();
-        // Si ambos registraron el cruce mutuo en la fase regular, pertenecen a la misma zona
-        if (cnt > 0 && (otherMap.get(curr) || 0) > 0) {
-          visited.add(otherId);
-          queue.push(otherId);
+    let bestGain = 0;
+    let bestU = null;
+    let bestV = null;
+
+    for (const u of arrA) {
+      let intU = 0;
+      let extU = 0;
+      for (const x of arrA) if (x !== u) intU += getWeight(u, x);
+      for (const y of arrB) extU += getWeight(u, y);
+      const dU = extU - intU;
+
+      for (const v of arrB) {
+        let intV = 0;
+        let extV = 0;
+        for (const y of arrB) if (y !== v) intV += getWeight(v, y);
+        for (const x of arrA) extV += getWeight(v, x);
+        const dV = extV - intV;
+
+        const gain = dU + dV - 2 * getWeight(u, v);
+        if (gain > bestGain) {
+          bestGain = gain;
+          bestU = u;
+          bestV = v;
         }
-      });
+      }
     }
 
-    clusters.push(Array.from(compSet));
-  });
+    if (bestGain > 0 && bestU && bestV) {
+      setA.delete(bestU);
+      setB.add(bestU);
+      setB.delete(bestV);
+      setA.add(bestV);
+      improved = true;
+    }
+  }
 
-  clusters.sort((a, b) => b.length - a.length);
-
-  let setA = new Set(clusters[0] || []);
-  let setB = new Set(clusters[1] || []);
-
-  // Si algún equipo quedó suelto, asignarlo al cluster con el que tenga más cruces mutuos
-  const assignedAll = new Set([...setA, ...setB]);
-  Array.from(validTeamIds).forEach(id => {
-    if (assignedAll.has(id)) return;
-    const mMap = matchupsByTeam.get(id) || new Map();
-    let scoreA = 0;
-    let scoreB = 0;
-    mMap.forEach((cnt, oppId) => {
-      if (setA.has(oppId)) scoreA += cnt;
-      if (setB.has(oppId)) scoreB += cnt;
-    });
-    if (scoreA >= scoreB) setA.add(id);
-    else setB.add(id);
-  });
-
-  // Asegurar que Grupo A sea el grupo donde está Vélez si es posible
+  // Asegurar que Grupo A sea el grupo donde está Vélez
   if (setB.has(String(velezId)) && !setA.has(String(velezId))) {
     const tmp = setA;
     setA = setB;
@@ -1421,7 +1428,7 @@ async function computeVelezTournamentFixture(now) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v27 activo. Endpoints: /api/velez-data y /api/velez-fixture' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v28 activo. Endpoints: /api/velez-data y /api/velez-fixture' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
