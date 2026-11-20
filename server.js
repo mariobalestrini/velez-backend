@@ -832,7 +832,9 @@ async function computeVelezPayload(now) {
     : Infinity;
   const isWithin24HoursPostMatch = Boolean(lastFinishedEv && hoursSinceLastMatch >= 0 && hoursSinceLastMatch <= 26);
 
-  const targetEv = liveEvent || (isWithin24HoursPostMatch ? lastFinishedEv : upcoming[0]);
+  // Si no hay próximo partido confirmado (y no es 31/12), se mantiene el último partido disputado como referencia
+  const useLastAsReference = !liveEvent && upcoming.length === 0 && !isDec31 && Boolean(lastFinishedEv);
+  const targetEv = liveEvent || (isWithin24HoursPostMatch || useLastAsReference ? lastFinishedEv : upcoming[0]);
 
   if (targetEv) {
     const comp = targetEv.competitions[0];
@@ -865,7 +867,7 @@ async function computeVelezPayload(now) {
     let livePossession = null;
     let rawDetails = comp.details || [];
 
-    if ((liveEvent || isWithin24HoursPostMatch)) {
+    if ((liveEvent || isWithin24HoursPostMatch || useLastAsReference)) {
       try {
         const isCopa = (targetEv.league?.slug || '').includes('copa');
         const baseApi = isCopa ? ESPN_COPA : ESPN_LPF;
@@ -955,6 +957,7 @@ async function computeVelezPayload(now) {
     let matchMode = 'NEXT';
     if (liveEvent) matchMode = 'LIVE';
     else if (isWithin24HoursPostMatch) matchMode = 'FINISHED_24H';
+    else if (useLastAsReference) matchMode = 'LAST_REFERENCE';
 
     currentMatch = {
       type: matchMode,
@@ -990,7 +993,7 @@ async function computeVelezPayload(now) {
           timestampMs,
           venue: { name: comp.venue?.fullName || 'Estadio José Amalfitani' },
           status: {
-            short: matchMode === 'LIVE' ? 'LIVE' : (matchMode === 'FINISHED_24H' ? 'FT' : 'NS'),
+            short: matchMode === 'LIVE' ? 'LIVE' : (matchMode === 'FINISHED_24H' || matchMode === 'LAST_REFERENCE' ? 'FT' : 'NS'),
             long: comp.status?.type?.detail || 'Programado',
             elapsed: comp.status?.displayClock || comp.status?.type?.shortDetail || ''
           }
