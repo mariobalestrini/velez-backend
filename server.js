@@ -310,7 +310,6 @@ async function buildGroupStandingsDynamically(allTeams, curYear, velezId, season
     })
   );
 
-  // Particionar dinámicamente los 30 equipos en 2 grupos de 15 minimizando cruces interzonales (Kernighan-Lin)
   const half = Math.floor(validTeamIds.length / 2);
   let setA = new Set(validTeamIds.slice(0, half));
   let setB = new Set(validTeamIds.slice(half));
@@ -365,7 +364,6 @@ async function buildGroupStandingsDynamically(allTeams, curYear, velezId, season
     }
   }
 
-  // Asegurar que Grupo A sea el grupo donde está Vélez
   if (setB.has(String(velezId)) && !setA.has(String(velezId))) {
     const tmp = setA;
     setA = setB;
@@ -1252,22 +1250,10 @@ async function computeVelezTournamentFixture(now) {
   ]);
 
   let tournamentName = 'Torneo Clausura';
-  let velezPlayedInTournament = 0;
-
   if (standingsRes.status === 'fulfilled' && standingsRes.value.data) {
     const data = standingsRes.value.data;
-    const children = data.children || [];
-    const rawTourney = children[0]?.name || data.name || '';
+    const rawTourney = data.children?.[0]?.name || data.name || '';
     if (rawTourney) tournamentName = rawTourney;
-
-    const allEntries = children.flatMap(ch => ch.standings?.entries || []);
-    const velezRow = allEntries.find(e => String(e.team?.id) === velezId);
-    if (velezRow) {
-      const pjStat = (velezRow.stats || []).find(s => s.name === 'gamesPlayed' || s.type === 'gamesPlayed');
-      if (pjStat && pjStat.value !== undefined) {
-        velezPlayedInTournament = Number(pjStat.value) || 0;
-      }
-    }
   }
 
   const tourneyNorm = normalizeStr(tournamentName);
@@ -1287,37 +1273,37 @@ async function computeVelezTournamentFixture(now) {
   if (schedPastRes.status === 'fulfilled') addEvs(schedPastRes.value.data?.events);
   if (schedFutureLpfRes.status === 'fulfilled') addEvs(schedFutureLpfRes.value.data?.events);
 
-  const tournamentEvents = Array.from(eventMap.values()).filter(ev => {
+  const yearEvents = Array.from(eventMap.values()).filter(ev => {
     const comp = ev.competitions?.[0];
     if (!comp) return false;
-
     const evYear = getArgentinaNowParts(new Date(ev.date).getTime()).year;
     if (evYear !== curYear) return false;
-
-    const leagueSlug = normalizeStr(ev.league?.slug || comp.league?.slug || '');
-    if (leagueSlug && leagueSlug !== 'arg1' && leagueSlug !== 'arg 1') {
-      return false;
-    }
-
     const metaText = normalizeStr(
       `${ev.season?.name || ''} ${ev.seasonType?.name || ''} ${ev.seasonType?.abbreviation || ''} ${comp.type?.text || ''} ${comp.notes?.[0]?.headline || ''}`
     );
-
-    if (metaText.includes('amistoso') || metaText.includes('friendly')) {
-      return false;
-    }
-
-    if (seasonKeyword && metaText.includes(seasonKeyword)) {
-      return true;
-    }
-
-    return !metaText.includes('apertura') && !metaText.includes('clausura');
+    return !metaText.includes('amistoso') && !metaText.includes('friendly');
   });
 
-  tournamentEvents.sort((a, b) => new Date(b.date) - new Date(a.date));
+  let filteredEvents = yearEvents;
+  if (seasonKeyword) {
+    const matchingSeason = yearEvents.filter(ev => {
+      const comp = ev.competitions?.[0];
+      const metaText = normalizeStr(
+        `${ev.season?.name || ''} ${ev.seasonType?.name || ''} ${ev.seasonType?.abbreviation || ''} ${comp.type?.text || ''} ${comp.notes?.[0]?.headline || ''}`
+      );
+      if (seasonKeyword === 'clausura' && metaText.includes('apertura') && !metaText.includes('clausura')) return false;
+      if (seasonKeyword === 'apertura' && metaText.includes('clausura') && !metaText.includes('apertura')) return false;
+      return true;
+    });
+    if (matchingSeason.length > 0) {
+      filteredEvents = matchingSeason;
+    }
+  }
+
+  filteredEvents.sort((a, b) => new Date(b.date) - new Date(a.date));
 
   const matches = await Promise.all(
-    tournamentEvents.map(async (ev) => {
+    filteredEvents.map(async (ev) => {
       const comp = ev.competitions[0];
       const state = comp.status?.type?.state || 'pre';
       const completed = comp.status?.type?.completed === true || state === 'post';
@@ -1422,13 +1408,12 @@ async function computeVelezTournamentFixture(now) {
 
   return {
     tournamentName,
-    playedCount: velezPlayedInTournament,
     matches
   };
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v28 activo. Endpoints: /api/velez-data y /api/velez-fixture' });
+  res.json({ status: 'OK', mensaje: 'Backend Vélez ESPN v29 activo. Endpoints: /api/velez-data y /api/velez-fixture' });
 });
 
 app.get('/api/velez-data', async (req, res) => {
