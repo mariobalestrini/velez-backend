@@ -109,6 +109,10 @@ function isAperturaLabel(str = '') {
   return /\b1st phase\b|\bapertura\b/i.test(String(str));
 }
 
+function isClausuraLabel(str = '') {
+  return /\b2nd phase\b|\bclausura\b/i.test(String(str));
+}
+
 function isLeagueMatch(ev = {}) {
   const lid = Number(ev.league?.id || 0);
   if (lid === LIGA_ARG_ID) return true;
@@ -819,11 +823,21 @@ async function fetchCurrentSquad(season) {
 }
 
 async function computeClausuraSquadStats(baseSquad, finishedMatches, activeTournamentName = 'Torneo Clausura') {
-  const isClausuraActive = /clausura/i.test(activeTournamentName);
+  const isClausuraActive = isClausuraLabel(activeTournamentName);
+  const isAperturaActive = isAperturaLabel(activeTournamentName);
+
   const regularLeagueMatches = (finishedMatches || []).filter(f => {
     if (!isLeagueMatch(f) || isPlayoffRound(f.league?.round)) return false;
-    if (isClausuraActive) return !isAperturaLabel(f.league?.round);
-    return isAperturaLabel(f.league?.round) || !/clausura|2nd phase/i.test(String(f.league?.round || ''));
+    const r = String(f.league?.round || '');
+    if (isClausuraActive) {
+      if (isAperturaLabel(r)) return false;
+      return isClausuraLabel(r) || !/\b1st phase\b|\bapertura\b/i.test(r);
+    }
+    if (isAperturaActive) {
+      if (isClausuraLabel(r)) return false;
+      return isAperturaLabel(r) || !/\b2nd phase\b|\bclausura\b/i.test(r);
+    }
+    return true;
   });
 
   const pjCount = new Map();
@@ -857,9 +871,17 @@ async function computeClausuraSquadStats(baseSquad, finishedMatches, activeTourn
     const velezLineup = (lineupsResp || []).find(item => Number(item.team?.id) === VELEZ_ID);
     const matchPlayersSet = new Set();
     const startersList = velezLineup?.startXI || [];
-    const subsList = velezLineup?.substitutes || [];
 
-    if (startersList.length > 0 || subsList.length > 0) {
+    const subbedInIds = new Set();
+    (eventsResp || []).forEach(evItem => {
+      if (Number(evItem.team?.id) !== VELEZ_ID) return;
+      if (String(evItem.type || '').toLowerCase() === 'subst') {
+        const enteredId = Number(evItem.assist?.id || 0);
+        if (enteredId) subbedInIds.add(enteredId);
+      }
+    });
+
+    if (startersList.length > 0) {
       startersList.forEach(x => {
         const pid = Number(x.player?.id || 0);
         if (pid) matchPlayersSet.add(pid);
@@ -867,16 +889,15 @@ async function computeClausuraSquadStats(baseSquad, finishedMatches, activeTourn
           cleanSheetsCount.set(pid, (cleanSheetsCount.get(pid) || 0) + 1);
         }
       });
-      subsList.forEach(x => {
-        const pid = Number(x.player?.id || 0);
-        if (pid) matchPlayersSet.add(pid);
-      });
     }
+
+    subbedInIds.forEach(pid => {
+      if (pid) matchPlayersSet.add(pid);
+    });
 
     (eventsResp || []).forEach(evItem => {
       if (Number(evItem.team?.id) !== VELEZ_ID) return;
       const pid = Number(evItem.player?.id || 0);
-      const assistId = Number(evItem.assist?.id || 0);
       const typeLower = String(evItem.type || '').toLowerCase();
       const detailLower = String(evItem.detail || '').toLowerCase();
       const commentsLower = String(evItem.comments || '').toLowerCase();
@@ -885,13 +906,6 @@ async function computeClausuraSquadStats(baseSquad, finishedMatches, activeTourn
         commentsLower.includes('shootout') ||
         detailLower.includes('shootout') ||
         (minElapsed >= 118 && (detailLower.includes('penalty') || detailLower.includes('missed') || detailLower.includes('saved')));
-
-      if (pid && (typeLower === 'subst' || typeLower === 'goal' || typeLower === 'card')) {
-        matchPlayersSet.add(pid);
-      }
-      if (assistId && typeLower === 'subst') {
-        matchPlayersSet.add(assistId);
-      }
 
       if (typeLower === 'goal' && !isShootout && !detailLower.includes('own goal') && !detailLower.includes('missed penalty') && pid) {
         goalsCount.set(pid, (goalsCount.get(pid) || 0) + 1);
