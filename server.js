@@ -11,6 +11,9 @@ const BASE_URL = 'https://v3.football.api-sports.io';
 
 const VELEZ_ID = 438;
 const LIGA_ARG_ID = 128;
+const COPA_ARG_ID = 130;
+const SUDAMERICANA_ID = 11;
+const COMP_IDS = [LIGA_ARG_ID, COPA_ARG_ID, SUDAMERICANA_ID];
 const SEASON = 2026;
 
 let cacheData = null;
@@ -36,6 +39,7 @@ function normalizeStr(str) {
 
 function translateSpanishLabels(str = '') {
   return String(str || '')
+    .replace(/\bRound of 64\b/gi, '32avos de Final')
     .replace(/\bRound of 32\b/gi, 'Dieciseisavos de Final')
     .replace(/\bRound of 16\b/gi, 'Octavos de Final')
     .replace(/\bQuarter-?finals?\b/gi, 'Cuartos de Final')
@@ -45,9 +49,23 @@ function translateSpanishLabels(str = '') {
     .replace(/\bGroup\s+B\b/gi, 'Grupo B')
     .replace(/\bGroup\s+C\b/gi, 'Grupo C')
     .replace(/\bGroup\s+D\b/gi, 'Grupo D')
+    .replace(/\bGroup\s+E\b/gi, 'Grupo E')
+    .replace(/\bGroup\s+F\b/gi, 'Grupo F')
+    .replace(/\bGroup\s+G\b/gi, 'Grupo G')
+    .replace(/\bGroup\s+H\b/gi, 'Grupo H')
     .replace(/\b2nd Phase\b/gi, 'Torneo Clausura')
     .replace(/\b1st Phase\b/gi, 'Torneo Apertura')
     .trim();
+}
+
+function getCompetitionDisplayName(leagueObj = {}) {
+  const lid = Number(leagueObj?.id || 0);
+  if (lid === COPA_ARG_ID) return 'Copa Argentina';
+  if (lid === SUDAMERICANA_ID) return 'Copa Sudamericana';
+  const rawName = String(leagueObj?.name || 'Liga Profesional Argentina');
+  if (/copa argentina/i.test(rawName)) return 'Copa Argentina';
+  if (/sudamericana/i.test(rawName)) return 'Copa Sudamericana';
+  return translateSpanishLabels(rawName || 'Liga Profesional Argentina');
 }
 
 function cleanRoundLabel(roundStr = '') {
@@ -66,11 +84,19 @@ function cleanGroupLabel(groupStr = '') {
 }
 
 function isPlayoffRound(roundStr = '') {
-  return /round of 32|dieciseisavos|round of 16|octavos|quarter|cuartos|semi|final|play-?off|eliminaci[oó]n|knockout/i.test(String(roundStr));
+  return /64|32avos|round of 32|dieciseisavos|round of 16|octavos|quarter|cuartos|semi|final|play-?off|eliminaci[oó]n|knockout/i.test(String(roundStr));
 }
 
 function isAperturaLabel(str = '') {
   return /\b1st phase\b|\bapertura\b/i.test(String(str));
+}
+
+function isLeagueMatch(ev = {}) {
+  const lid = Number(ev.league?.id || 0);
+  if (lid === LIGA_ARG_ID) return true;
+  if (lid === COPA_ARG_ID || lid === SUDAMERICANA_ID) return false;
+  const cname = String(ev.league?.name || '');
+  return !/copa argentina|sudamericana|libertadores/i.test(cname);
 }
 
 function calculatePlayerAge(player = {}) {
@@ -161,6 +187,36 @@ async function apiFootballGet(path, params = {}) {
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+async function fetchVelezAllCompetitionsFixtures() {
+  const results = await Promise.allSettled(
+    COMP_IDS.map(leagueId => apiFootballGet('/fixtures', { team: VELEZ_ID, league: leagueId, season: SEASON }))
+  );
+
+  const byId = new Map();
+  results.forEach((r, idx) => {
+    const fallbackLeagueId = COMP_IDS[idx];
+    if (r.status === 'fulfilled' && Array.isArray(r.value)) {
+      r.value.forEach(ev => {
+        const enriched = {
+          ...ev,
+          league: {
+            ...(ev.league || {}),
+            id: Number(ev.league?.id || fallbackLeagueId),
+            name: getCompetitionDisplayName({
+              id: ev.league?.id || fallbackLeagueId,
+              name: ev.league?.name
+            })
+          }
+        };
+        const key = String(ev.fixture?.id || `${fallbackLeagueId}-${ev.fixture?.date}`);
+        byId.set(key, enriched);
+      });
+    }
+  });
+
+  return Array.from(byId.values());
 }
 
 function getStatValue(statsList = [], typeName) {
@@ -374,7 +430,6 @@ function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId,
     }
   });
 
-  // Ordenar cronológicamente del más reciente al más antiguo para vista minuto a minuto
   timeline.sort((a, b) => b.sortKey - a.sortKey);
 
   return { scorers, cards, penaltyShootout, timeline };
@@ -393,8 +448,9 @@ function formatPastMatchApiFootball(ev, targetTeamId = VELEZ_ID) {
   const d = new Date(ev.fixture?.date);
   return {
     id: String(ev.fixture?.id || ''),
+    leagueId: Number(ev.league?.id || LIGA_ARG_ID),
     fecha: cleanRoundLabel(ev.league?.round || 'LPF'),
-    comp: translateSpanishLabels(ev.league?.name || 'Liga Profesional Argentina'),
+    comp: getCompetitionDisplayName(ev.league),
     date: d.toLocaleDateString('es-AR', { day: '2-digit', month: 'short', timeZone: 'America/Argentina/Buenos_Aires' }),
     rival: oppTeam?.name || 'Rival',
     rivalLogo: oppTeam?.logo || '',
@@ -565,7 +621,8 @@ function parseStandingsResponse(standingsResp = [], allLeagueFixtures = [], targ
 }
 
 function detectActiveTournamentName(fixtures = [], standingsResp = []) {
-  const rounds = (fixtures || []).map(f => String(f.league?.round || ''));
+  const leagueFixtures = (fixtures || []).filter(isLeagueMatch);
+  const rounds = leagueFixtures.map(f => String(f.league?.round || ''));
   const groups = (standingsResp[0]?.league?.standings || []).flat().map(r => String(r?.group || ''));
   const allLabels = [...rounds, ...groups].join(' ');
   if (/clausura|2nd phase/i.test(allLabels)) return 'Torneo Clausura';
@@ -640,7 +697,7 @@ async function fetchCurrentSquad() {
 
 async function computeClausuraSquadStats(baseSquad, finishedMatches) {
   const clausuraMatches = (finishedMatches || []).filter(
-    f => !isPlayoffRound(f.league?.round) && !isAperturaLabel(f.league?.round)
+    f => isLeagueMatch(f) && !isPlayoffRound(f.league?.round) && !isAperturaLabel(f.league?.round)
   );
 
   const pjCount = new Map();
@@ -738,7 +795,7 @@ async function computeClausuraSquadStats(baseSquad, finishedMatches) {
 
 async function computeVelezPayload(nowMs = Date.now()) {
   const [fixtures, allLeagueFixtures, standingsResp, baseSquad] = await Promise.all([
-    apiFootballGet('/fixtures', { team: VELEZ_ID, league: LIGA_ARG_ID, season: SEASON }),
+    fetchVelezAllCompetitionsFixtures(),
     apiFootballGet('/fixtures', { league: LIGA_ARG_ID, season: SEASON }),
     apiFootballGet('/standings', { league: LIGA_ARG_ID, season: SEASON }),
     fetchCurrentSquad()
@@ -771,8 +828,9 @@ async function computeVelezPayload(nowMs = Date.now()) {
     const rivalTeam = isHome ? ev.teams?.away : ev.teams?.home;
     const d = new Date(ev.fixture?.date);
     return {
+      leagueId: Number(ev.league?.id || LIGA_ARG_ID),
       fecha: cleanRoundLabel(ev.league?.round || 'PRÓXIMO'),
-      comp: translateSpanishLabels(ev.league?.name || 'Liga Profesional Argentina'),
+      comp: getCompetitionDisplayName(ev.league),
       isoDate: d.toISOString(),
       timestamp: d.getTime(),
       date: d.toLocaleDateString('es-AR', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'America/Argentina/Buenos_Aires' }),
@@ -908,7 +966,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
           }
         },
         league: {
-          name: translateSpanishLabels(targetEv.league?.name || 'Liga Profesional Argentina'),
+          id: Number(targetEv.league?.id || LIGA_ARG_ID),
+          name: getCompetitionDisplayName(targetEv.league),
           round: cleanRoundLabel(targetEv.league?.round || '')
         }
       }
@@ -939,6 +998,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
           status: { short: 'TBD', long: 'Próximo encuentro a confirmar' }
         },
         league: {
+          id: LIGA_ARG_ID,
           name: 'Liga Profesional Argentina',
           round: 'Calendario por definir'
         }
@@ -987,6 +1047,11 @@ async function computeVelezPayload(nowMs = Date.now()) {
 
   return {
     velezApiFootballId: VELEZ_ID,
+    competitions: {
+      liga: LIGA_ARG_ID,
+      copaArgentina: COPA_ARG_ID,
+      sudamericana: SUDAMERICANA_ID
+    },
     activeTournamentName,
     grupoAName: standingsParsed.grupoAName,
     grupoBName: standingsParsed.grupoBName,
@@ -1009,7 +1074,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
 }
 
 async function computeVelezTournamentFixture() {
-  const fixtures = await apiFootballGet('/fixtures', { team: VELEZ_ID, league: LIGA_ARG_ID, season: SEASON });
+  const fixtures = await fetchVelezAllCompetitionsFixtures();
   const sortedDesc = [...fixtures].sort(
     (a, b) => new Date(b.fixture?.date || 0).getTime() - new Date(a.fixture?.date || 0).getTime()
   );
@@ -1055,11 +1120,12 @@ async function computeVelezTournamentFixture() {
 
       return {
         id: String(ev.fixture?.id || ''),
+        leagueId: Number(ev.league?.id || LIGA_ARG_ID),
         status,
         isoDate: d.toISOString(),
         timestamp: d.getTime(),
         round: cleanRoundLabel(ev.league?.round || 'Fecha'),
-        comp: translateSpanishLabels(ev.league?.name || 'Liga Profesional Argentina'),
+        comp: getCompetitionDisplayName(ev.league),
         stadium: ev.fixture?.venue?.name || (isVelezHome ? 'Estadio José Amalfitani' : 'Estadio a confirmar'),
         cond: isVelezHome ? 'L' : 'V',
         home: {
