@@ -42,15 +42,18 @@ function cleanRoundLabel(roundStr = '') {
 }
 
 function isPlayoffRound(roundStr = '') {
-  return /round of 16|octavos|quarter|cuartos|semi|final|play-?off|eliminaci[oó]n/i.test(String(roundStr));
+  return /round of 16|octavos|quarter|cuartos|semi|final|play-?off|eliminaci[oó]n|knockout/i.test(String(roundStr));
+}
+
+function isAperturaLabel(str = '') {
+  return /\b1st phase\b|\bapertura\b/i.test(String(str));
 }
 
 function isClausuraRegularRound(roundStr = '') {
-  const r = normalizeStr(roundStr);
+  const r = String(roundStr || '');
   if (!r) return false;
-  if (isPlayoffRound(r)) return false;
-  if (r.includes('1st phase') || r.includes('apertura')) return false;
-  return r.includes('2nd phase') || r.includes('clausura') || /fecha\s*\d+/.test(r) || r.includes('regular');
+  if (isPlayoffRound(r) || isAperturaLabel(r)) return false;
+  return /2nd phase|clausura|regular|fecha\s*\d+|group\s*[ab]/i.test(r);
 }
 
 function mapPosition(posName, posAbbr) {
@@ -192,7 +195,6 @@ function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId)
     const detailLower = String(ev.detail || '').toLowerCase();
     const commentsLower = String(ev.comments || '').toLowerCase();
 
-    // Excluir tiros de tanda de penales (API-Football los marca con detail 'Penalty' en minutos de tanda o comments de shootout)
     const isShootoutPenalty =
       commentsLower.includes('shootout') ||
       commentsLower.includes('penalty shootout') ||
@@ -247,92 +249,24 @@ function formatPastMatchApiFootball(ev, targetTeamId = VELEZ_ID) {
   };
 }
 
-function buildStandingsFromRegularFixtures(fixtures = [], targetTeamId = VELEZ_ID) {
-  const finishedStatuses = ['FT', 'AET', 'PEN'];
-  const clausuraRegular = (fixtures || []).filter(f =>
-    finishedStatuses.includes(f.fixture?.status?.short) &&
-    isClausuraRegularRound(f.league?.round)
-  );
-
-  const map = new Map();
-  const ensureTeam = (teamObj) => {
-    if (!teamObj?.id) return null;
-    const id = String(teamObj.id);
-    if (!map.has(id)) {
-      map.set(id, {
-        id,
-        name: teamObj.name || 'Equipo',
-        logo: teamObj.logo || '',
-        isVelez: Number(teamObj.id) === Number(targetTeamId),
-        pj: 0,
-        pg: 0,
-        pe: 0,
-        pp: 0,
-        gf: 0,
-        gc: 0,
-        dg: 0,
-        pts: 0,
-        cupType: null,
-        cupNote: '',
-        cupColor: null
-      });
-    }
-    return map.get(id);
-  };
-
-  clausuraRegular.forEach(f => {
-    const homeRow = ensureTeam(f.teams?.home);
-    const awayRow = ensureTeam(f.teams?.away);
-    if (!homeRow || !awayRow) return;
-
-    const gh = Number(f.goals?.home ?? 0);
-    const ga = Number(f.goals?.away ?? 0);
-
-    homeRow.pj += 1;
-    awayRow.pj += 1;
-    homeRow.gf += gh;
-    homeRow.gc += ga;
-    awayRow.gf += ga;
-    awayRow.gc += gh;
-
-    if (gh > ga) {
-      homeRow.pg += 1;
-      homeRow.pts += 3;
-      awayRow.pp += 1;
-    } else if (ga > gh) {
-      awayRow.pg += 1;
-      awayRow.pts += 3;
-      homeRow.pp += 1;
-    } else {
-      homeRow.pe += 1;
-      awayRow.pe += 1;
-      homeRow.pts += 1;
-      awayRow.pts += 1;
-    }
-
-    homeRow.dg = homeRow.gf - homeRow.gc;
-    awayRow.dg = awayRow.gf - awayRow.gc;
-  });
-
-  return Array.from(map.values()).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
-}
-
-function parseStandingsResponse(standingsResp = [], fallbackFixtures = [], targetTeamId = VELEZ_ID) {
+function parseStandingsResponse(standingsResp = [], targetTeamId = VELEZ_ID) {
   const leagueStandings = standingsResp[0]?.league?.standings || [];
-  const groups = [];
+  const candidateGroups = [];
 
   if (Array.isArray(leagueStandings) && leagueStandings.length > 0) {
     if (Array.isArray(leagueStandings[0])) {
       leagueStandings.forEach((groupRows, idx) => {
-        const cleanGroupName = cleanRoundLabel(groupRows[0]?.group || `Grupo ${idx === 0 ? 'A' : 'B'}`);
-        if (!isPlayoffRound(cleanGroupName)) {
-          groups.push({ name: cleanGroupName, rows: groupRows });
+        const rawGroup = String(groupRows[0]?.group || `Grupo ${idx === 0 ? 'A' : 'B'}`);
+        const cleanGroup = cleanRoundLabel(rawGroup);
+        if (!isPlayoffRound(rawGroup) && !isAperturaLabel(rawGroup)) {
+          candidateGroups.push({ name: cleanGroup, rows: groupRows });
         }
       });
     } else {
-      const cleanGroupName = cleanRoundLabel(leagueStandings[0]?.group || 'Tabla General');
-      if (!isPlayoffRound(cleanGroupName)) {
-        groups.push({ name: cleanGroupName, rows: leagueStandings });
+      const rawGroup = String(leagueStandings[0]?.group || 'Torneo Clausura');
+      const cleanGroup = cleanRoundLabel(rawGroup);
+      if (!isPlayoffRound(rawGroup) && !isAperturaLabel(rawGroup)) {
+        candidateGroups.push({ name: cleanGroup, rows: leagueStandings });
       }
     }
   }
@@ -376,20 +310,19 @@ function parseStandingsResponse(standingsResp = [], fallbackFixtures = [], targe
   let grupoAName = 'Grupo A';
   let grupoBName = 'Grupo B';
 
-  if (groups.length >= 2) {
-    grupoAName = groups[0].name || 'Grupo A';
-    grupoBName = groups[1].name || 'Grupo B';
-    standingsGrupoA = groups[0].rows.map(mapRow).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
-    standingsGrupoB = groups[1].rows.map(mapRow).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
-  } else if (groups.length === 1) {
-    grupoAName = groups[0].name || 'Torneo Clausura';
-    standingsGrupoA = groups[0].rows.map(mapRow).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
-  } else {
-    standingsGrupoA = buildStandingsFromRegularFixtures(fallbackFixtures, targetTeamId);
+  if (candidateGroups.length >= 2) {
+    grupoAName = candidateGroups[0].name || 'Grupo A';
+    grupoBName = candidateGroups[1].name || 'Grupo B';
+    standingsGrupoA = candidateGroups[0].rows.map(mapRow).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
+    standingsGrupoB = candidateGroups[1].rows.map(mapRow).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
+  } else if (candidateGroups.length === 1) {
+    grupoAName = candidateGroups[0].name || 'Grupo A';
+    standingsGrupoA = candidateGroups[0].rows.map(mapRow).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
   }
 
+  const velezInA = standingsGrupoA.some(t => t.isVelez);
   const velezInB = standingsGrupoB.some(t => t.isVelez);
-  const standingsClausura = velezInB ? standingsGrupoB : standingsGrupoA;
+  const standingsClausura = velezInB ? standingsGrupoB : (velezInA ? standingsGrupoA : standingsGrupoA);
 
   return {
     standingsClausura,
@@ -401,7 +334,9 @@ function parseStandingsResponse(standingsResp = [], fallbackFixtures = [], targe
   };
 }
 
-async function fetchSquadWithClausuraStats() {
+async function fetchBaseSquad() {
+  const mapById = new Map();
+
   try {
     const playersResp = await apiFootballGet('/players', {
       team: VELEZ_ID,
@@ -409,86 +344,176 @@ async function fetchSquadWithClausuraStats() {
       season: SEASON
     });
 
-    if (Array.isArray(playersResp) && playersResp.length > 0) {
-      return playersResp.map(entry => {
-        const player = entry.player || {};
-        const statBlock = (entry.statistics || []).find(s => Number(s.league?.id) === LIGA_ARG_ID) || entry.statistics?.[0] || {};
-        const posInfo = mapPosition(statBlock.games?.position || player.position, '');
-        const countryInfo = mapCountryToIso(player.nationality);
-        const pj = Number(statBlock.games?.appearences ?? 0);
-        const goals = Number(statBlock.goals?.total ?? 0);
-        const conceded = Number(statBlock.goals?.conceded ?? 0);
-        const yellowCards = Number(statBlock.cards?.yellow ?? 0);
-        const redCards = Number((statBlock.cards?.red ?? 0) + (statBlock.cards?.yellowred ?? 0));
-        const cleanSheets = posInfo.group === 'ARQ'
-          ? (pj > 0 ? Math.max(0, pj - conceded) : 0)
-          : null;
-
-        return {
-          id: Number(player.id || 0),
-          name: player.name || 'Jugador',
-          shortName: player.lastname || player.name || 'Jugador',
-          age: Number(player.age || 0),
-          number: Number(statBlock.games?.number ?? player.number ?? 0) || null,
-          dorsal: Number(statBlock.games?.number ?? player.number ?? 0) || null,
-          jersey: Number(statBlock.games?.number ?? player.number ?? 0) || null,
-          position: posInfo.posLabel,
-          posLabel: posInfo.posLabel,
-          group: posInfo.group,
-          countryCode: countryInfo.code,
-          countryName: countryInfo.label,
-          flagUrl: `https://flagcdn.com/w80/${countryInfo.code}.png`,
-          photo: player.photo || '',
-          pj,
-          goals,
-          cleanSheets,
-          yellowCards,
-          redCards
-        };
-      });
-    }
-  } catch (err) {
-    console.warn('Error obteniendo /players en API-Football:', err.message);
-  }
-
-  try {
-    const squadsResp = await apiFootballGet('/players/squads', { team: VELEZ_ID });
-    const list = squadsResp[0]?.players || [];
-    return list.map(p => {
-      const posInfo = mapPosition(p.position, '');
-      return {
-        id: Number(p.id || 0),
-        name: p.name || 'Jugador',
-        shortName: p.name || 'Jugador',
-        age: Number(p.age || 0),
-        number: Number(p.number || 0) || null,
-        dorsal: Number(p.number || 0) || null,
-        jersey: Number(p.number || 0) || null,
+    (playersResp || []).forEach(entry => {
+      const player = entry.player || {};
+      const statBlock = (entry.statistics || []).find(s => Number(s.league?.id) === LIGA_ARG_ID) || entry.statistics?.[0] || {};
+      const id = Number(player.id || 0);
+      if (!id) return;
+      const posInfo = mapPosition(statBlock.games?.position || player.position, '');
+      const countryInfo = mapCountryToIso(player.nationality);
+      mapById.set(id, {
+        id,
+        name: player.name || 'Jugador',
+        shortName: player.lastname || player.name || 'Jugador',
+        age: Number(player.age || 0),
+        number: Number(statBlock.games?.number ?? player.number ?? 0) || null,
+        dorsal: Number(statBlock.games?.number ?? player.number ?? 0) || null,
+        jersey: Number(statBlock.games?.number ?? player.number ?? 0) || null,
         position: posInfo.posLabel,
         posLabel: posInfo.posLabel,
         group: posInfo.group,
-        countryCode: 'ar',
-        countryName: 'Argentina',
-        flagUrl: 'https://flagcdn.com/w80/ar.png',
-        photo: p.photo || '',
+        countryCode: countryInfo.code,
+        countryName: countryInfo.label,
+        flagUrl: `https://flagcdn.com/w80/${countryInfo.code}.png`,
+        photo: player.photo || '',
         pj: 0,
         goals: 0,
         cleanSheets: posInfo.group === 'ARQ' ? 0 : null,
         yellowCards: 0,
         redCards: 0
-      };
+      });
     });
   } catch (err) {
-    console.warn('Error obteniendo /players/squads en API-Football:', err.message);
-    return [];
+    console.warn('Error leyendo /players:', err.message);
   }
+
+  try {
+    const squadsResp = await apiFootballGet('/players/squads', { team: VELEZ_ID });
+    const list = squadsResp[0]?.players || [];
+    list.forEach(p => {
+      const id = Number(p.id || 0);
+      if (!id) return;
+      const posInfo = mapPosition(p.position, '');
+      const existing = mapById.get(id);
+      if (existing) {
+        existing.number = existing.number || Number(p.number || 0) || null;
+        existing.dorsal = existing.number;
+        existing.jersey = existing.number;
+        existing.group = posInfo.group || existing.group;
+        existing.posLabel = posInfo.posLabel || existing.posLabel;
+        existing.position = existing.posLabel;
+        existing.cleanSheets = existing.group === 'ARQ' ? 0 : null;
+      } else {
+        mapById.set(id, {
+          id,
+          name: p.name || 'Jugador',
+          shortName: p.name || 'Jugador',
+          age: Number(p.age || 0),
+          number: Number(p.number || 0) || null,
+          dorsal: Number(p.number || 0) || null,
+          jersey: Number(p.number || 0) || null,
+          position: posInfo.posLabel,
+          posLabel: posInfo.posLabel,
+          group: posInfo.group,
+          countryCode: 'ar',
+          countryName: 'Argentina',
+          flagUrl: 'https://flagcdn.com/w80/ar.png',
+          photo: p.photo || '',
+          pj: 0,
+          goals: 0,
+          cleanSheets: posInfo.group === 'ARQ' ? 0 : null,
+          yellowCards: 0,
+          redCards: 0
+        });
+      }
+    });
+  } catch (err) {
+    console.warn('Error leyendo /players/squads:', err.message);
+  }
+
+  return Array.from(mapById.values());
+}
+
+async function computeClausuraSquadStats(baseSquad, finishedMatches) {
+  const clausuraMatches = (finishedMatches || []).filter(f => !isPlayoffRound(f.league?.round) && !isAperturaLabel(f.league?.round));
+  const pjCount = new Map();
+  const goalsCount = new Map();
+  const yellowCount = new Map();
+  const redCount = new Map();
+  const cleanSheetsCount = new Map();
+
+  for (const ev of clausuraMatches) {
+    const fId = ev.fixture?.id;
+    if (!fId) continue;
+
+    const isVelezHome = Number(ev.teams?.home?.id) === VELEZ_ID;
+    const rivalGoals = Number(isVelezHome ? (ev.goals?.away ?? 0) : (ev.goals?.home ?? 0));
+
+    try {
+      const [lineupsResp, eventsResp] = await Promise.all([
+        getFixtureLineupsCached(fId),
+        getFixtureEventsCached(fId, false)
+      ]);
+
+      const velezLineup = (lineupsResp || []).find(item => Number(item.team?.id) === VELEZ_ID);
+      const matchPlayersSet = new Set();
+
+      if (velezLineup) {
+        (velezLineup.startXI || []).forEach(x => {
+          const pid = Number(x.player?.id || 0);
+          if (pid) matchPlayersSet.add(pid);
+          if (String(x.player?.pos || '').toUpperCase() === 'G' && pid) {
+            if (rivalGoals === 0) cleanSheetsCount.set(pid, (cleanSheetsCount.get(pid) || 0) + 1);
+          }
+        });
+        (velezLineup.substitutes || []).forEach(x => {
+          const pid = Number(x.player?.id || 0);
+          if (pid) matchPlayersSet.add(pid);
+        });
+      }
+
+      (eventsResp || []).forEach(evItem => {
+        const pid = Number(evItem.player?.id || 0);
+        const assistId = Number(evItem.assist?.id || 0);
+        if (Number(evItem.team?.id) === VELEZ_ID) {
+          if (pid && String(evItem.type || '').toLowerCase() === 'subst') {
+            matchPlayersSet.add(pid);
+          }
+          if (assistId && String(evItem.type || '').toLowerCase() === 'subst') {
+            matchPlayersSet.add(assistId);
+          }
+
+          const minElapsed = Number(evItem.time?.elapsed ?? 0);
+          const typeLower = String(evItem.type || '').toLowerCase();
+          const detailLower = String(evItem.detail || '').toLowerCase();
+          const commentsLower = String(evItem.comments || '').toLowerCase();
+          const isShootout = commentsLower.includes('shootout') || (detailLower === 'penalty' && minElapsed >= 120);
+
+          if (typeLower === 'goal' && !isShootout && !detailLower.includes('own goal') && !detailLower.includes('missed penalty') && pid) {
+            goalsCount.set(pid, (goalsCount.get(pid) || 0) + 1);
+          } else if (typeLower === 'card' && pid) {
+            if (detailLower.includes('red') || detailLower.includes('second yellow')) {
+              redCount.set(pid, (redCount.get(pid) || 0) + 1);
+            } else if (detailLower.includes('yellow')) {
+              yellowCount.set(pid, (yellowCount.get(pid) || 0) + 1);
+            }
+          }
+        }
+      });
+
+      matchPlayersSet.forEach(pid => {
+        pjCount.set(pid, (pjCount.get(pid) || 0) + 1);
+      });
+    } catch (err) {
+      // Continuar si un partido no tiene eventos o alineación
+    }
+  }
+
+  return (baseSquad || []).map(p => ({
+    ...p,
+    pj: pjCount.get(p.id) || 0,
+    goals: goalsCount.get(p.id) || 0,
+    yellowCards: yellowCount.get(p.id) || 0,
+    redCards: redCount.get(p.id) || 0,
+    cleanSheets: p.group === 'ARQ' ? (cleanSheetsCount.get(p.id) || 0) : null
+  }));
 }
 
 async function computeVelezPayload(nowMs = Date.now()) {
-  const [fixtures, standingsResp, squad] = await Promise.all([
+  const [fixtures, standingsResp, baseSquad] = await Promise.all([
     apiFootballGet('/fixtures', { team: VELEZ_ID, league: LIGA_ARG_ID, season: SEASON }),
     apiFootballGet('/standings', { league: LIGA_ARG_ID, season: SEASON }),
-    fetchSquadWithClausuraStats()
+    fetchBaseSquad()
   ]);
 
   const sortedAsc = [...fixtures].sort(
@@ -505,6 +530,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
   );
   const nextMatchRaw = upcomingRaw[0] || null;
   const lastFinishedRaw = finishedMatches[finishedMatches.length - 1] || null;
+
+  const squad = await computeClausuraSquadStats(baseSquad, finishedMatches);
 
   const lastMatches = [...finishedMatches].reverse().slice(0, 5).map(ev => formatPastMatchApiFootball(ev, VELEZ_ID));
   const velezLast2 = lastMatches.slice(0, 2);
@@ -713,7 +740,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
   }
 
   const lastLineup = recentLineups[0] || { formation: '4-2-3-1', rival: '', date: '', starters: [] };
-  const standingsParsed = parseStandingsResponse(standingsResp, fixtures, VELEZ_ID);
+  const standingsParsed = parseStandingsResponse(standingsResp, VELEZ_ID);
 
   return {
     velezApiFootballId: VELEZ_ID,
@@ -727,6 +754,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
     rivalLast2: [],
     upcomingMatches,
     squad,
+    clausuraSquad: squad,
     lastLineup,
     recentLineups,
     lastMatchStats,
