@@ -763,6 +763,7 @@ async function fetchCurrentSquad(season) {
       const id = Number(player.id || 0);
       if (!id) return;
       const countryInfo = mapCountryToIso(player.nationality);
+      const rawHeight = player.height ? String(player.height).trim() : '';
       metaById.set(id, {
         age: calculatePlayerAge(player),
         height: rawHeight || null,
@@ -784,6 +785,7 @@ async function fetchCurrentSquad(season) {
     const posInfo = mapPosition(p.position, '');
     const meta = metaById.get(id) || {
       age: calculatePlayerAge(p),
+      height: null,
       countryCode: 'ar',
       countryName: 'Argentina',
       flagUrl: 'https://flagcdn.com/w80/ar.png',
