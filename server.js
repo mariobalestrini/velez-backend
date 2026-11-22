@@ -14,7 +14,6 @@ const LIGA_ARG_ID = 128;
 const COPA_ARG_ID = 130;
 const SUDAMERICANA_ID = 11;
 const COMP_IDS = [LIGA_ARG_ID, COPA_ARG_ID, SUDAMERICANA_ID];
-const SEASON = 2026;
 
 let cacheData = null;
 let cacheTime = 0;
@@ -27,6 +26,18 @@ let inflightFixtureRequest = null;
 const statsCacheByFixture = new Map();
 const eventsCacheByFixture = new Map();
 const lineupsCacheByFixture = new Map();
+
+function getCurrentSeasonYear(nowMs = Date.now()) {
+  if (process.env.SEASON) {
+    const envSeason = Number(process.env.SEASON);
+    if (!Number.isNaN(envSeason) && envSeason >= 2020) return envSeason;
+  }
+  const yearStr = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    year: 'numeric'
+  }).format(new Date(nowMs));
+  return Number(yearStr) || new Date(nowMs).getFullYear();
+}
 
 function normalizeStr(str) {
   return (str || '')
@@ -189,9 +200,9 @@ async function apiFootballGet(path, params = {}) {
   }
 }
 
-async function fetchVelezAllCompetitionsFixtures() {
+async function fetchVelezAllCompetitionsFixtures(season) {
   const results = await Promise.allSettled(
-    COMP_IDS.map(leagueId => apiFootballGet('/fixtures', { team: VELEZ_ID, league: leagueId, season: SEASON }))
+    COMP_IDS.map(leagueId => apiFootballGet('/fixtures', { team: VELEZ_ID, league: leagueId, season }))
   );
 
   const byId = new Map();
@@ -630,14 +641,14 @@ function detectActiveTournamentName(fixtures = [], standingsResp = []) {
   return translateSpanishLabels(standingsResp[0]?.league?.name || 'Liga Profesional');
 }
 
-async function fetchCurrentSquad() {
+async function fetchCurrentSquad(season) {
   const metaById = new Map();
 
   try {
     const playersResp = await apiFootballGet('/players', {
       team: VELEZ_ID,
       league: LIGA_ARG_ID,
-      season: SEASON
+      season
     });
     (playersResp || []).forEach(entry => {
       const player = entry.player || {};
@@ -695,10 +706,13 @@ async function fetchCurrentSquad() {
   });
 }
 
-async function computeClausuraSquadStats(baseSquad, finishedMatches) {
-  const clausuraMatches = (finishedMatches || []).filter(
-    f => isLeagueMatch(f) && !isPlayoffRound(f.league?.round) && !isAperturaLabel(f.league?.round)
-  );
+async function computeClausuraSquadStats(baseSquad, finishedMatches, activeTournamentName = 'Torneo Clausura') {
+  const isClausuraActive = /clausura/i.test(activeTournamentName);
+  const regularLeagueMatches = (finishedMatches || []).filter(f => {
+    if (!isLeagueMatch(f) || isPlayoffRound(f.league?.round)) return false;
+    if (isClausuraActive) return !isAperturaLabel(f.league?.round);
+    return isAperturaLabel(f.league?.round) || !/clausura|2nd phase/i.test(String(f.league?.round || ''));
+  });
 
   const pjCount = new Map();
   const goalsCount = new Map();
@@ -706,7 +720,7 @@ async function computeClausuraSquadStats(baseSquad, finishedMatches) {
   const redCount = new Map();
   const cleanSheetsCount = new Map();
 
-  for (const ev of clausuraMatches) {
+  for (const ev of regularLeagueMatches) {
     const fId = ev.fixture?.id;
     if (!fId) continue;
 
@@ -794,11 +808,13 @@ async function computeClausuraSquadStats(baseSquad, finishedMatches) {
 }
 
 async function computeVelezPayload(nowMs = Date.now()) {
+  const season = getCurrentSeasonYear(nowMs);
+
   const [fixtures, allLeagueFixtures, standingsResp, baseSquad] = await Promise.all([
-    fetchVelezAllCompetitionsFixtures(),
-    apiFootballGet('/fixtures', { league: LIGA_ARG_ID, season: SEASON }),
-    apiFootballGet('/standings', { league: LIGA_ARG_ID, season: SEASON }),
-    fetchCurrentSquad()
+    fetchVelezAllCompetitionsFixtures(season),
+    apiFootballGet('/fixtures', { league: LIGA_ARG_ID, season }),
+    apiFootballGet('/standings', { league: LIGA_ARG_ID, season }),
+    fetchCurrentSquad(season)
   ]);
 
   const activeTournamentName = detectActiveTournamentName(fixtures, standingsResp);
@@ -818,7 +834,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
   const nextMatchRaw = upcomingRaw[0] || null;
   const lastFinishedRaw = finishedMatches[finishedMatches.length - 1] || null;
 
-  const squad = await computeClausuraSquadStats(baseSquad, finishedMatches);
+  const squad = await computeClausuraSquadStats(baseSquad, finishedMatches, activeTournamentName);
 
   const lastMatches = [...finishedMatches].reverse().slice(0, 5).map(ev => formatPastMatchApiFootball(ev, VELEZ_ID));
   const velezLast2 = lastMatches.slice(0, 2);
@@ -1046,6 +1062,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
   const standingsParsed = parseStandingsResponse(standingsResp, allLeagueFixtures, VELEZ_ID);
 
   return {
+    season,
     velezApiFootballId: VELEZ_ID,
     competitions: {
       liga: LIGA_ARG_ID,
@@ -1074,7 +1091,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
 }
 
 async function computeVelezTournamentFixture() {
-  const fixtures = await fetchVelezAllCompetitionsFixtures();
+  const season = getCurrentSeasonYear(Date.now());
+  const fixtures = await fetchVelezAllCompetitionsFixtures(season);
   const sortedDesc = [...fixtures].sort(
     (a, b) => new Date(b.fixture?.date || 0).getTime() - new Date(a.fixture?.date || 0).getTime()
   );
@@ -1146,7 +1164,8 @@ async function computeVelezTournamentFixture() {
   );
 
   return {
-    tournamentName: 'Torneo Clausura',
+    season,
+    tournamentName: detectActiveTournamentName(fixtures, []),
     matches
   };
 }
@@ -1154,6 +1173,7 @@ async function computeVelezTournamentFixture() {
 app.get('/', (req, res) => {
   res.json({
     status: 'OK',
+    season: getCurrentSeasonYear(Date.now()),
     mensaje: 'Backend Vélez API-Football activo. Endpoints: /api/velez-data y /api/velez-fixture'
   });
 });
@@ -1235,5 +1255,5 @@ app.get('/api/velez-fixture', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en puerto ${PORT}`);
+  console.log(`Servidor corriendo en puerto ${PORT} (temporada ${getCurrentSeasonYear(Date.now())})`);
 });
