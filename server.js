@@ -53,16 +53,17 @@ function isClausuraRegularRound(roundStr = '') {
   return r.includes('2nd phase') || r.includes('clausura') || /fecha\s*\d+/.test(r) || r.includes('regular');
 }
 
-function mapPosition(posAbbr, posName) {
-  const abbr = (posAbbr || '').toUpperCase();
-  const name = (posName || '').toLowerCase();
-  if (abbr === 'G' || abbr === 'GK' || abbr === 'ARQ' || name.includes('arquero') || name.includes('goalkeeper') || name.includes('portero')) {
+function mapPosition(posName, posAbbr) {
+  const name = String(posName || '').toLowerCase();
+  const abbr = String(posAbbr || '').toUpperCase();
+
+  if (name.includes('goalkeeper') || name.includes('arquero') || name.includes('portero') || abbr === 'G' || abbr === 'GK' || abbr === 'ARQ') {
     return { group: 'ARQ', posLabel: 'Arquero' };
   }
-  if (abbr === 'D' || abbr === 'DF' || abbr === 'DEF' || name.includes('defensor') || name.includes('defender') || name.includes('lateral')) {
+  if (name.includes('defender') || name.includes('defensor') || name.includes('lateral') || abbr === 'D' || abbr === 'DF' || abbr === 'DEF') {
     return { group: 'DEF', posLabel: 'Defensor' };
   }
-  if (abbr === 'F' || abbr === 'FW' || abbr === 'A' || abbr === 'DEL' || name.includes('delantero') || name.includes('atacante') || name.includes('forward')) {
+  if (name.includes('attacker') || name.includes('forward') || name.includes('delantero') || name.includes('atacante') || abbr === 'F' || abbr === 'FW' || abbr === 'A' || abbr === 'DEL') {
     return { group: 'DEL', posLabel: 'Delantero' };
   }
   return { group: 'MED', posLabel: 'Mediocampista' };
@@ -183,14 +184,21 @@ function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId)
     const side = evTeamId === Number(homeTeamId) ? 'home' : (evTeamId === Number(awayTeamId) ? 'away' : null);
     if (!side) return;
 
-    const minuteElapsed = ev.time?.elapsed ?? '';
+    const minuteElapsed = Number(ev.time?.elapsed ?? 0);
     const minuteExtra = ev.time?.extra ? `+${ev.time.extra}` : '';
-    const clock = minuteElapsed !== '' ? `${minuteElapsed}${minuteExtra}'` : '';
+    const clock = ev.time?.elapsed !== undefined && ev.time?.elapsed !== null ? `${minuteElapsed}${minuteExtra}'` : '';
     const playerName = ev.player?.name || 'Jugador';
     const typeLower = String(ev.type || '').toLowerCase();
     const detailLower = String(ev.detail || '').toLowerCase();
+    const commentsLower = String(ev.comments || '').toLowerCase();
 
-    if (typeLower === 'goal') {
+    // Excluir tiros de tanda de penales (API-Football los marca con detail 'Penalty' en minutos de tanda o comments de shootout)
+    const isShootoutPenalty =
+      commentsLower.includes('shootout') ||
+      commentsLower.includes('penalty shootout') ||
+      (detailLower === 'penalty' && minuteElapsed >= 120);
+
+    if (typeLower === 'goal' && !isShootoutPenalty) {
       if (detailLower.includes('own goal')) {
         scorers[side].push(`${playerName} ${clock} (EC)`.trim());
       } else if (detailLower.includes('penalty')) {
@@ -380,7 +388,6 @@ function parseStandingsResponse(standingsResp = [], fallbackFixtures = [], targe
     standingsGrupoA = buildStandingsFromRegularFixtures(fallbackFixtures, targetTeamId);
   }
 
-  const velezInA = standingsGrupoA.some(t => t.isVelez);
   const velezInB = standingsGrupoB.some(t => t.isVelez);
   const standingsClausura = velezInB ? standingsGrupoB : standingsGrupoA;
 
@@ -406,7 +413,7 @@ async function fetchSquadWithClausuraStats() {
       return playersResp.map(entry => {
         const player = entry.player || {};
         const statBlock = (entry.statistics || []).find(s => Number(s.league?.id) === LIGA_ARG_ID) || entry.statistics?.[0] || {};
-        const posInfo = mapPosition(statBlock.games?.position, player.position);
+        const posInfo = mapPosition(statBlock.games?.position || player.position, '');
         const countryInfo = mapCountryToIso(player.nationality);
         const pj = Number(statBlock.games?.appearences ?? 0);
         const goals = Number(statBlock.goals?.total ?? 0);
@@ -414,7 +421,7 @@ async function fetchSquadWithClausuraStats() {
         const yellowCards = Number(statBlock.cards?.yellow ?? 0);
         const redCards = Number((statBlock.cards?.red ?? 0) + (statBlock.cards?.yellowred ?? 0));
         const cleanSheets = posInfo.group === 'ARQ'
-          ? (statBlock.goals?.saves !== undefined && pj > 0 ? Math.max(0, pj - conceded) : 0)
+          ? (pj > 0 ? Math.max(0, pj - conceded) : 0)
           : null;
 
         return {
@@ -425,7 +432,7 @@ async function fetchSquadWithClausuraStats() {
           number: Number(statBlock.games?.number ?? player.number ?? 0) || null,
           dorsal: Number(statBlock.games?.number ?? player.number ?? 0) || null,
           jersey: Number(statBlock.games?.number ?? player.number ?? 0) || null,
-          position: statBlock.games?.position || posInfo.posLabel,
+          position: posInfo.posLabel,
           posLabel: posInfo.posLabel,
           group: posInfo.group,
           countryCode: countryInfo.code,
@@ -448,7 +455,7 @@ async function fetchSquadWithClausuraStats() {
     const squadsResp = await apiFootballGet('/players/squads', { team: VELEZ_ID });
     const list = squadsResp[0]?.players || [];
     return list.map(p => {
-      const posInfo = mapPosition('', p.position);
+      const posInfo = mapPosition(p.position, '');
       return {
         id: Number(p.id || 0),
         name: p.name || 'Jugador',
@@ -457,7 +464,7 @@ async function fetchSquadWithClausuraStats() {
         number: Number(p.number || 0) || null,
         dorsal: Number(p.number || 0) || null,
         jersey: Number(p.number || 0) || null,
-        position: p.position || posInfo.posLabel,
+        position: posInfo.posLabel,
         posLabel: posInfo.posLabel,
         group: posInfo.group,
         countryCode: 'ar',
@@ -687,7 +694,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
           comp: parsed.comp,
           starters: velezLineup.startXI.slice(0, 11).map(entry => {
             const pl = entry.player || {};
-            const posInfo = mapPosition(pl.pos, '');
+            const posInfo = mapPosition('', pl.pos);
             return {
               id: Number(pl.id || 0),
               name: pl.name || 'Jugador',
