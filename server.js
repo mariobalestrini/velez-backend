@@ -397,7 +397,6 @@ function parseStandingsResponse(standingsResp = [], allLeagueFixtures = [], targ
   };
 }
 
-// Obtiene el plantel actual registrado para Vélez en API-Football (/players/squads)
 async function fetchCurrentSquad() {
   const metaById = new Map();
 
@@ -464,7 +463,11 @@ async function fetchCurrentSquad() {
 }
 
 async function computeClausuraSquadStats(baseSquad, finishedMatches) {
-  const clausuraMatches = (finishedMatches || []).filter(f => !isPlayoffRound(f.league?.round) && !isAperturaLabel(f.league?.round));
+  // Tomamos todos los partidos finalizados del Clausura (excluyendo Apertura y playoffs)
+  const clausuraMatches = (finishedMatches || []).filter(
+    f => !isPlayoffRound(f.league?.round) && !isAperturaLabel(f.league?.round)
+  );
+
   const pjCount = new Map();
   const goalsCount = new Map();
   const yellowCount = new Map();
@@ -478,64 +481,72 @@ async function computeClausuraSquadStats(baseSquad, finishedMatches) {
     const isVelezHome = Number(ev.teams?.home?.id) === VELEZ_ID;
     const rivalGoals = Number(isVelezHome ? (ev.goals?.away ?? 0) : (ev.goals?.home ?? 0));
 
+    let lineupsResp = [];
+    let eventsResp = [];
+
     try {
-      const [lineupsResp, eventsResp] = await Promise.all([
-        getFixtureLineupsCached(fId),
-        getFixtureEventsCached(fId, false)
-      ]);
+      lineupsResp = await getFixtureLineupsCached(fId);
+    } catch (e) {
+      lineupsResp = [];
+    }
 
-      const velezLineup = (lineupsResp || []).find(item => Number(item.team?.id) === VELEZ_ID);
-      const matchPlayersSet = new Set();
+    try {
+      eventsResp = await getFixtureEventsCached(fId, false);
+    } catch (e) {
+      eventsResp = [];
+    }
 
-      if (velezLineup) {
-        (velezLineup.startXI || []).forEach(x => {
-          const pid = Number(x.player?.id || 0);
-          if (pid) matchPlayersSet.add(pid);
-          if (String(x.player?.pos || '').toUpperCase() === 'G' && pid) {
-            if (rivalGoals === 0) cleanSheetsCount.set(pid, (cleanSheetsCount.get(pid) || 0) + 1);
-          }
-        });
-        (velezLineup.substitutes || []).forEach(x => {
-          const pid = Number(x.player?.id || 0);
-          if (pid) matchPlayersSet.add(pid);
-        });
-      }
+    const velezLineup = (lineupsResp || []).find(item => Number(item.team?.id) === VELEZ_ID);
+    const matchPlayersSet = new Set();
+    const startersList = velezLineup?.startXI || [];
+    const subsList = velezLineup?.substitutes || [];
 
-      (eventsResp || []).forEach(evItem => {
-        const pid = Number(evItem.player?.id || 0);
-        const assistId = Number(evItem.assist?.id || 0);
-        if (Number(evItem.team?.id) === VELEZ_ID) {
-          if (pid && String(evItem.type || '').toLowerCase() === 'subst') {
-            matchPlayersSet.add(pid);
-          }
-          if (assistId && String(evItem.type || '').toLowerCase() === 'subst') {
-            matchPlayersSet.add(assistId);
-          }
-
-          const minElapsed = Number(evItem.time?.elapsed ?? 0);
-          const typeLower = String(evItem.type || '').toLowerCase();
-          const detailLower = String(evItem.detail || '').toLowerCase();
-          const commentsLower = String(evItem.comments || '').toLowerCase();
-          const isShootout = commentsLower.includes('shootout') || (detailLower === 'penalty' && minElapsed >= 120);
-
-          if (typeLower === 'goal' && !isShootout && !detailLower.includes('own goal') && !detailLower.includes('missed penalty') && pid) {
-            goalsCount.set(pid, (goalsCount.get(pid) || 0) + 1);
-          } else if (typeLower === 'card' && pid) {
-            if (detailLower.includes('red') || detailLower.includes('second yellow')) {
-              redCount.set(pid, (redCount.get(pid) || 0) + 1);
-            } else if (detailLower.includes('yellow')) {
-              yellowCount.set(pid, (yellowCount.get(pid) || 0) + 1);
-            }
-          }
+    if (startersList.length > 0 || subsList.length > 0) {
+      startersList.forEach(x => {
+        const pid = Number(x.player?.id || 0);
+        if (pid) matchPlayersSet.add(pid);
+        if (String(x.player?.pos || '').toUpperCase() === 'G' && pid && rivalGoals === 0) {
+          cleanSheetsCount.set(pid, (cleanSheetsCount.get(pid) || 0) + 1);
         }
       });
-
-      matchPlayersSet.forEach(pid => {
-        pjCount.set(pid, (pjCount.get(pid) || 0) + 1);
+      subsList.forEach(x => {
+        const pid = Number(x.player?.id || 0);
+        if (pid) matchPlayersSet.add(pid);
       });
-    } catch (err) {
-      // Continuar si un partido no tiene eventos o alineación
     }
+
+    // Completar participaciones desde eventos (útil cuando no hay alineación cargada o entró desde el banco)
+    (eventsResp || []).forEach(evItem => {
+      if (Number(evItem.team?.id) !== VELEZ_ID) return;
+      const pid = Number(evItem.player?.id || 0);
+      const assistId = Number(evItem.assist?.id || 0);
+      const typeLower = String(evItem.type || '').toLowerCase();
+      const detailLower = String(evItem.detail || '').toLowerCase();
+      const commentsLower = String(evItem.comments || '').toLowerCase();
+      const minElapsed = Number(evItem.time?.elapsed ?? 0);
+      const isShootout = commentsLower.includes('shootout') || (detailLower === 'penalty' && minElapsed >= 120);
+
+      if (pid && (typeLower === 'subst' || typeLower === 'goal' || typeLower === 'card')) {
+        matchPlayersSet.add(pid);
+      }
+      if (assistId && typeLower === 'subst') {
+        matchPlayersSet.add(assistId);
+      }
+
+      if (typeLower === 'goal' && !isShootout && !detailLower.includes('own goal') && !detailLower.includes('missed penalty') && pid) {
+        goalsCount.set(pid, (goalsCount.get(pid) || 0) + 1);
+      } else if (typeLower === 'card' && pid) {
+        if (detailLower.includes('red') || detailLower.includes('second yellow')) {
+          redCount.set(pid, (redCount.get(pid) || 0) + 1);
+        } else if (detailLower.includes('yellow')) {
+          yellowCount.set(pid, (yellowCount.get(pid) || 0) + 1);
+        }
+      }
+    });
+
+    matchPlayersSet.forEach(pid => {
+      pjCount.set(pid, (pjCount.get(pid) || 0) + 1);
+    });
   }
 
   return (baseSquad || []).map(p => ({
