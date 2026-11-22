@@ -174,6 +174,7 @@ function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId)
     home: { yellow: [], red: [] },
     away: { yellow: [], red: [] }
   };
+  const penaltyShootout = { home: [], away: [] };
 
   (eventsList || []).forEach(ev => {
     const evTeamId = Number(ev.team?.id || 0);
@@ -188,12 +189,27 @@ function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId)
     const detailLower = String(ev.detail || '').toLowerCase();
     const commentsLower = String(ev.comments || '').toLowerCase();
 
-    const isShootoutPenalty =
+    const isShootoutEvent =
       commentsLower.includes('shootout') ||
       commentsLower.includes('penalty shootout') ||
-      (detailLower === 'penalty' && minuteElapsed >= 120);
+      detailLower.includes('shootout') ||
+      (minuteElapsed >= 120 && (detailLower.includes('penalty') || detailLower.includes('missed')));
 
-    if (typeLower === 'goal' && !isShootoutPenalty) {
+    if (isShootoutEvent) {
+      const scored =
+        typeLower === 'goal' ||
+        detailLower === 'penalty' ||
+        (!detailLower.includes('missed') && !detailLower.includes('saved') && !detailLower.includes('no goal'));
+
+      penaltyShootout[side].push({
+        player: playerName,
+        scored,
+        minute: clock
+      });
+      return;
+    }
+
+    if (typeLower === 'goal') {
       if (detailLower.includes('own goal')) {
         scorers[side].push(`${playerName} ${clock} (EC)`.trim());
       } else if (detailLower.includes('penalty')) {
@@ -210,7 +226,7 @@ function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId)
     }
   });
 
-  return { scorers, cards };
+  return { scorers, cards, penaltyShootout };
 }
 
 function formatPastMatchApiFootball(ev, targetTeamId = VELEZ_ID) {
@@ -463,7 +479,6 @@ async function fetchCurrentSquad() {
 }
 
 async function computeClausuraSquadStats(baseSquad, finishedMatches) {
-  // Tomamos todos los partidos finalizados del Clausura (excluyendo Apertura y playoffs)
   const clausuraMatches = (finishedMatches || []).filter(
     f => !isPlayoffRound(f.league?.round) && !isAperturaLabel(f.league?.round)
   );
@@ -515,7 +530,6 @@ async function computeClausuraSquadStats(baseSquad, finishedMatches) {
       });
     }
 
-    // Completar participaciones desde eventos (útil cuando no hay alineación cargada o entró desde el banco)
     (eventsResp || []).forEach(evItem => {
       if (Number(evItem.team?.id) !== VELEZ_ID) return;
       const pid = Number(evItem.player?.id || 0);
@@ -524,7 +538,10 @@ async function computeClausuraSquadStats(baseSquad, finishedMatches) {
       const detailLower = String(evItem.detail || '').toLowerCase();
       const commentsLower = String(evItem.comments || '').toLowerCase();
       const minElapsed = Number(evItem.time?.elapsed ?? 0);
-      const isShootout = commentsLower.includes('shootout') || (detailLower === 'penalty' && minElapsed >= 120);
+      const isShootout =
+        commentsLower.includes('shootout') ||
+        detailLower.includes('shootout') ||
+        (minElapsed >= 120 && (detailLower.includes('penalty') || detailLower.includes('missed')));
 
       if (pid && (typeLower === 'subst' || typeLower === 'goal' || typeLower === 'card')) {
         matchPlayersSet.add(pid);
@@ -629,6 +646,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
 
     let scorers = { home: [], away: [] };
     let cards = { home: { yellow: [], red: [] }, away: { yellow: [], red: [] } };
+    let penaltyShootout = { home: [], away: [] };
     let possessionObj = null;
 
     if (isLive || isFinishedTarget) {
@@ -641,6 +659,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
         const parsedEv = parseEventsIntoScorersAndCards(evList, homeId, awayId);
         scorers = parsedEv.scorers;
         cards = parsedEv.cards;
+        penaltyShootout = parsedEv.penaltyShootout;
 
         const velezBlock = (statsList || []).find(b => Number(b.team?.id) === VELEZ_ID);
         const rivalBlock = (statsList || []).find(b => Number(b.team?.id) !== VELEZ_ID);
@@ -705,6 +724,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
         score: targetEv.score || {},
         scorers,
         cards,
+        penaltyShootout,
         possession: possessionObj,
         fixture: {
           date: isoDateStrict,
@@ -740,6 +760,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
         goals: { home: null, away: null },
         scorers: { home: [], away: [] },
         cards: { home: { yellow: [], red: [] }, away: { yellow: [], red: [] } },
+        penaltyShootout: { home: [], away: [] },
         possession: null,
         fixture: {
           date: null,
