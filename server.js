@@ -384,6 +384,7 @@ function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId,
     home: { yellow: [], red: [] },
     away: { yellow: [], red: [] }
   };
+  const substitutions = { home: [], away: [] };
   const penaltyShootout = { home: [], away: [] };
   const timeline = [];
 
@@ -519,6 +520,11 @@ function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId,
     } else if (typeLower === 'subst') {
       const playerIn = ev.assist?.name || playerName;
       const playerOut = ev.assist?.name ? playerName : '';
+      substitutions[side].push({
+        minute: clock,
+        playerIn,
+        playerOut
+      });
       timeline.push({
         sortKey,
         minute: clock,
@@ -545,7 +551,7 @@ function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId,
 
   timeline.sort((a, b) => b.sortKey - a.sortKey);
 
-  return { scorers, cards, penaltyShootout, timeline };
+  return { scorers, cards, substitutions, penaltyShootout, timeline };
 }
 
 function formatPastMatchApiFootball(ev, targetTeamId = VELEZ_ID) {
@@ -986,6 +992,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
 
     let scorers = { home: [], away: [] };
     let cards = { home: { yellow: [], red: [] }, away: { yellow: [], red: [] } };
+    let substitutions = { home: [], away: [] };
     let penaltyShootout = { home: [], away: [] };
     let timeline = [];
     let matchStatistics = [];
@@ -1003,6 +1010,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
         const parsedEv = parseEventsIntoScorersAndCards(evList, homeId, awayId, homeNameStr, awayNameStr);
         scorers = parsedEv.scorers;
         cards = parsedEv.cards;
+        substitutions = parsedEv.substitutions;
         penaltyShootout = parsedEv.penaltyShootout;
         timeline = parsedEv.timeline;
 
@@ -1075,6 +1083,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
         score: targetEv.score || {},
         scorers,
         cards,
+        substitutions,
         penaltyShootout,
         timeline,
         statistics: matchStatistics,
@@ -1115,6 +1124,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
         goals: { home: null, away: null },
         scorers: { home: [], away: [] },
         cards: { home: { yellow: [], red: [] }, away: { yellow: [], red: [] } },
+        substitutions: { home: [], away: [] },
         penaltyShootout: { home: [], away: [] },
         timeline: [],
         statistics: [],
