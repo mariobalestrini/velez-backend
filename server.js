@@ -1,5 +1,4 @@
 const express = require('express');
-const axios = require('axios');
 const cors = require('cors');
 
 const app = express();
@@ -94,16 +93,36 @@ async function apiFootballGet(path, params = {}) {
   if (!API_KEY) {
     throw new Error('Falta configurar API_FOOTBALL_KEY en Render');
   }
-  const res = await axios.get(`${BASE_URL}${path}`, {
-    params,
-    headers: { 'x-apisports-key': API_KEY },
-    timeout: 9000
+
+  const url = new URL(`${BASE_URL}${path}`);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      url.searchParams.append(key, String(value));
+    }
   });
-  const data = res.data || {};
-  if (data.errors && Object.keys(data.errors).length > 0) {
-    throw new Error(`API-Football error: ${JSON.stringify(data.errors)}`);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 9000);
+
+  try {
+    const res = await fetch(url.toString(), {
+      headers: { 'x-apisports-key': API_KEY },
+      signal: controller.signal
+    });
+
+    if (!res.ok) {
+      throw new Error(`API-Football HTTP ${res.status} en ${path}`);
+    }
+
+    const data = await res.json();
+    if (data.errors && Object.keys(data.errors).length > 0) {
+      throw new Error(`API-Football error: ${JSON.stringify(data.errors)}`);
+    }
+
+    return data.response || [];
+  } finally {
+    clearTimeout(timeoutId);
   }
-  return data.response || [];
 }
 
 function getStatValue(statsList = [], typeName) {
@@ -650,7 +669,6 @@ async function computeVelezPayload(nowMs = Date.now()) {
     };
   }
 
-  // Formaciones recientes de los últimos partidos
   const recentLineups = [];
   const lineupsTargetEvents = [...finishedMatches].reverse().slice(0, 3);
   for (const ev of lineupsTargetEvents) {
