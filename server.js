@@ -48,8 +48,15 @@ function normalizeStr(str) {
     .trim();
 }
 
+function formatVelezName(nameStr = '') {
+  return String(nameStr || '')
+    .replace(/\bVelez\b/g, 'Vélez')
+    .replace(/\bvelez\b/g, 'vélez')
+    .trim();
+}
+
 function translateSpanishLabels(str = '') {
-  return String(str || '')
+  return formatVelezName(String(str || ''))
     .replace(/\bRound of 64\b/gi, '32avos de Final')
     .replace(/\bRound of 32\b/gi, 'Dieciseisavos de Final')
     .replace(/\bRound of 16\b/gi, 'Octavos de Final')
@@ -210,8 +217,14 @@ async function fetchVelezAllCompetitionsFixtures(season) {
     const fallbackLeagueId = COMP_IDS[idx];
     if (r.status === 'fulfilled' && Array.isArray(r.value)) {
       r.value.forEach(ev => {
+        const homeObj = ev.teams?.home || {};
+        const awayObj = ev.teams?.away || {};
         const enriched = {
           ...ev,
+          teams: {
+            home: { ...homeObj, name: formatVelezName(homeObj.name || 'Local') },
+            away: { ...awayObj, name: formatVelezName(awayObj.name || 'Visitante') }
+          },
           league: {
             ...(ev.league || {}),
             id: Number(ev.league?.id || fallbackLeagueId),
@@ -296,7 +309,7 @@ function parseMatchLineupsForView(lineupsResp = [], homeId, awayId) {
     if (!block) return null;
     return {
       teamId: Number(block.team?.id || 0),
-      teamName: block.team?.name || '',
+      teamName: formatVelezName(block.team?.name || ''),
       teamLogo: block.team?.logo || '',
       coach: block.coach?.name || '',
       formation: block.formation || '4-2-3-1',
@@ -379,7 +392,7 @@ function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId,
     const side = evTeamId === Number(homeTeamId) ? 'home' : (evTeamId === Number(awayTeamId) ? 'away' : null);
     if (!side) return;
 
-    const teamName = side === 'home' ? (ev.team?.name || homeTeamName) : (ev.team?.name || awayTeamName);
+    const teamName = formatVelezName(side === 'home' ? (ev.team?.name || homeTeamName) : (ev.team?.name || awayTeamName));
     const minuteElapsed = Number(ev.time?.elapsed ?? 0);
     const minuteExtraNum = Number(ev.time?.extra ?? 0);
     const minuteExtra = ev.time?.extra ? `+${ev.time.extra}` : '';
@@ -552,7 +565,7 @@ function formatPastMatchApiFootball(ev, targetTeamId = VELEZ_ID) {
     fecha: cleanRoundLabel(ev.league?.round || 'LPF'),
     comp: getCompetitionDisplayName(ev.league),
     date: d.toLocaleDateString('es-AR', { day: '2-digit', month: 'short', timeZone: 'America/Argentina/Buenos_Aires' }),
-    rival: oppTeam?.name || 'Rival',
+    rival: formatVelezName(oppTeam?.name || 'Rival'),
     rivalLogo: oppTeam?.logo || '',
     cond: isHome ? 'L' : 'V',
     velezGoals: tGoals,
@@ -579,7 +592,7 @@ function buildAnnualStandingsFromLeagueFixtures(allLeagueFixtures = [], targetTe
     if (!map.has(id)) {
       map.set(id, {
         id,
-        name: teamObj.name || 'Equipo',
+        name: formatVelezName(teamObj.name || 'Equipo'),
         logo: teamObj.logo || '',
         isVelez: Number(teamObj.id) === Number(targetTeamId),
         pj: 0,
@@ -674,7 +687,7 @@ function parseStandingsResponse(standingsResp = [], allLeagueFixtures = [], targ
 
     return {
       id: String(r.team?.id || ''),
-      name: r.team?.name || 'Equipo',
+      name: formatVelezName(r.team?.name || 'Equipo'),
       logo: r.team?.logo || '',
       isVelez: Number(r.team?.id) === Number(targetTeamId),
       pj,
@@ -940,7 +953,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
       timestamp: d.getTime(),
       date: d.toLocaleDateString('es-AR', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'America/Argentina/Buenos_Aires' }),
       timeART: d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Argentina/Buenos_Aires' }) + ' ART',
-      rival: rivalTeam?.name || 'Rival',
+      rival: formatVelezName(rivalTeam?.name || 'Rival'),
       rivalLogo: rivalTeam?.logo || '',
       cond: isHome ? 'L' : 'V',
       stadium: ev.fixture?.venue?.name || (isHome ? 'Estadio José Amalfitani' : 'Estadio a confirmar')
@@ -964,8 +977,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
     const awayTeam = targetEv.teams?.away || {};
     const homeId = Number(homeTeam.id || 0);
     const awayId = Number(awayTeam.id || 0);
-    const homeNameStr = homeTeam.name || 'Local';
-    const awayNameStr = awayTeam.name || 'Visitante';
+    const homeNameStr = formatVelezName(homeTeam.name || 'Local');
+    const awayNameStr = formatVelezName(awayTeam.name || 'Visitante');
     const rivalTeam = homeId === VELEZ_ID ? awayTeam : homeTeam;
     const matchDateObj = new Date(targetEv.fixture?.date);
     const timestampMs = matchDateObj.getTime();
@@ -1015,7 +1028,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
           const totalShots = getStatValue(vStats, 'Total Shots') ?? (shotsOnTarget + shotsOffTarget);
 
           lastMatchStats = {
-            rival: rivalTeam.name || 'Rival',
+            rival: formatVelezName(rivalTeam.name || 'Rival'),
             date: matchDateObj.toLocaleDateString('es-AR', { day: '2-digit', month: 'short', timeZone: 'America/Argentina/Buenos_Aires' }),
             possession: getStatValue(vStats, 'Ball Possession'),
             oppPossession: getStatValue(rStats, 'Ball Possession'),
@@ -1207,6 +1220,8 @@ async function computeVelezTournamentFixture() {
       const awayTeam = ev.teams?.away || {};
       const homeId = Number(homeTeam.id || 0);
       const awayId = Number(awayTeam.id || 0);
+      const homeName = formatVelezName(homeTeam.name || 'Local');
+      const awayName = formatVelezName(awayTeam.name || 'Visitante');
       const isVelezHome = homeId === VELEZ_ID;
       const d = new Date(ev.fixture?.date);
 
@@ -1220,7 +1235,7 @@ async function computeVelezTournamentFixture() {
             getFixtureStatisticsCached(ev.fixture.id, status === 'LIVE')
           ]);
 
-          const parsedEv = parseEventsIntoScorersAndCards(evList, homeId, awayId, homeTeam.name, awayTeam.name);
+          const parsedEv = parseEventsIntoScorersAndCards(evList, homeId, awayId, homeName, awayName);
           scorers = parsedEv.scorers;
 
           const homeBlock = (statsList || []).find(b => Number(b.team?.id) === homeId);
@@ -1246,12 +1261,12 @@ async function computeVelezTournamentFixture() {
         stadium: ev.fixture?.venue?.name || (isVelezHome ? 'Estadio José Amalfitani' : 'Estadio a confirmar'),
         cond: isVelezHome ? 'L' : 'V',
         home: {
-          name: homeTeam.name || 'Local',
+          name: homeName,
           logo: homeTeam.logo || '',
           goals: status === 'UPCOMING' ? null : (ev.goals?.home ?? 0)
         },
         away: {
-          name: awayTeam.name || 'Visitante',
+          name: awayName,
           logo: awayTeam.logo || '',
           goals: status === 'UPCOMING' ? null : (ev.goals?.away ?? 0)
         },
