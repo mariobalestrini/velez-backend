@@ -34,15 +34,39 @@ function normalizeStr(str) {
     .trim();
 }
 
-function cleanRoundLabel(roundStr = '') {
-  return String(roundStr || '')
-    .replace(/\s*[•|-]?\s*(?:MF|FT)\s*-\s*Pens\b/gi, '')
-    .replace(/\s*-\s*Pens\b/gi, '')
+function translateSpanishLabels(str = '') {
+  return String(str || '')
+    .replace(/\bRound of 32\b/gi, 'Dieciseisavos de Final')
+    .replace(/\bRound of 16\b/gi, 'Octavos de Final')
+    .replace(/\bQuarter-?finals?\b/gi, 'Cuartos de Final')
+    .replace(/\bSemi-?finals?\b/gi, 'Semifinales')
+    .replace(/\bFinal\b/gi, 'Final')
+    .replace(/\bGroup\s+A\b/gi, 'Grupo A')
+    .replace(/\bGroup\s+B\b/gi, 'Grupo B')
+    .replace(/\bGroup\s+C\b/gi, 'Grupo C')
+    .replace(/\bGroup\s+D\b/gi, 'Grupo D')
+    .replace(/\b2nd Phase\b/gi, 'Torneo Clausura')
+    .replace(/\b1st Phase\b/gi, 'Torneo Apertura')
     .trim();
 }
 
+function cleanRoundLabel(roundStr = '') {
+  const cleaned = String(roundStr || '')
+    .replace(/\s*[•|-]?\s*(?:MF|FT)\s*-\s*Pens\b/gi, '')
+    .replace(/\s*-\s*Pens\b/gi, '')
+    .trim();
+  return translateSpanishLabels(cleaned);
+}
+
+function cleanGroupLabel(groupStr = '') {
+  const raw = cleanRoundLabel(groupStr);
+  if (/\bGrupo\s*A\b/i.test(raw)) return 'Grupo A';
+  if (/\bGrupo\s*B\b/i.test(raw)) return 'Grupo B';
+  return raw || 'Grupo A';
+}
+
 function isPlayoffRound(roundStr = '') {
-  return /round of 16|octavos|quarter|cuartos|semi|final|play-?off|eliminaci[oó]n|knockout/i.test(String(roundStr));
+  return /round of 32|dieciseisavos|round of 16|octavos|quarter|cuartos|semi|final|play-?off|eliminaci[oó]n|knockout/i.test(String(roundStr));
 }
 
 function isAperturaLabel(str = '') {
@@ -185,23 +209,28 @@ async function getFixtureLineupsCached(fixtureId) {
   return data;
 }
 
-function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId) {
+function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId, homeTeamName = 'Local', awayTeamName = 'Visitante') {
   const scorers = { home: [], away: [] };
   const cards = {
     home: { yellow: [], red: [] },
     away: { yellow: [], red: [] }
   };
   const penaltyShootout = { home: [], away: [] };
+  const timeline = [];
 
-  (eventsList || []).forEach(ev => {
+  (eventsList || []).forEach((ev, idx) => {
     const evTeamId = Number(ev.team?.id || 0);
     const side = evTeamId === Number(homeTeamId) ? 'home' : (evTeamId === Number(awayTeamId) ? 'away' : null);
     if (!side) return;
 
+    const teamName = side === 'home' ? (ev.team?.name || homeTeamName) : (ev.team?.name || awayTeamName);
     const minuteElapsed = Number(ev.time?.elapsed ?? 0);
+    const minuteExtraNum = Number(ev.time?.extra ?? 0);
     const minuteExtra = ev.time?.extra ? `+${ev.time.extra}` : '';
     const clock = ev.time?.elapsed !== undefined && ev.time?.elapsed !== null ? `${minuteElapsed}${minuteExtra}'` : '';
+    const sortKey = minuteElapsed * 100 + minuteExtraNum + idx * 0.001;
     const playerName = ev.player?.name || 'Jugador';
+    const assistName = ev.assist?.name || '';
     const typeLower = String(ev.type || '').toLowerCase();
     const detailLower = String(ev.detail || '').toLowerCase();
     const commentsLower = String(ev.comments || '').toLowerCase();
@@ -229,27 +258,126 @@ function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId)
         scored: Boolean(scored),
         minute: clock
       });
+
+      timeline.push({
+        sortKey,
+        minute: clock || 'PEN',
+        side,
+        team: teamName,
+        kind: scored ? 'PEN_GOAL' : 'PEN_MISS',
+        icon: scored ? '⚽' : '❌',
+        title: scored ? `Penal convertido: ${playerName}` : `Penal errado: ${playerName}`,
+        subtitle: 'Tanda de penales'
+      });
       return;
     }
 
     if (typeLower === 'goal') {
       if (detailLower.includes('own goal')) {
         scorers[side].push(`${playerName} ${clock} (EC)`.trim());
+        timeline.push({
+          sortKey,
+          minute: clock,
+          side,
+          team: teamName,
+          kind: 'GOAL',
+          icon: '⚽',
+          title: `Gol en contra: ${playerName}`,
+          subtitle: teamName
+        });
       } else if (detailLower.includes('penalty')) {
         scorers[side].push(`${playerName} ${clock} (P)`.trim());
-      } else if (!detailLower.includes('missed penalty')) {
+        timeline.push({
+          sortKey,
+          minute: clock,
+          side,
+          team: teamName,
+          kind: 'GOAL',
+          icon: '⚽',
+          title: `Gol de penal: ${playerName}`,
+          subtitle: teamName
+        });
+      } else if (detailLower.includes('missed penalty')) {
+        timeline.push({
+          sortKey,
+          minute: clock,
+          side,
+          team: teamName,
+          kind: 'PEN_MISS',
+          icon: '❌',
+          title: `Penal errado: ${playerName}`,
+          subtitle: teamName
+        });
+      } else {
         scorers[side].push(`${playerName} ${clock}`.trim());
+        timeline.push({
+          sortKey,
+          minute: clock,
+          side,
+          team: teamName,
+          kind: 'GOAL',
+          icon: '⚽',
+          title: `Gol de ${playerName}`,
+          subtitle: assistName ? `${teamName} • Asist. ${assistName}` : teamName
+        });
       }
     } else if (typeLower === 'card') {
       if (detailLower.includes('red') || detailLower.includes('second yellow')) {
         cards[side].red.push(`${playerName} ${clock}`.trim());
+        timeline.push({
+          sortKey,
+          minute: clock,
+          side,
+          team: teamName,
+          kind: 'RED_CARD',
+          icon: '🟥',
+          title: detailLower.includes('second yellow') ? `Doble amarilla y roja: ${playerName}` : `Tarjeta roja: ${playerName}`,
+          subtitle: teamName
+        });
       } else if (detailLower.includes('yellow')) {
         cards[side].yellow.push(`${playerName} ${clock}`.trim());
+        timeline.push({
+          sortKey,
+          minute: clock,
+          side,
+          team: teamName,
+          kind: 'YELLOW_CARD',
+          icon: '🟨',
+          title: `Tarjeta amarilla: ${playerName}`,
+          subtitle: teamName
+        });
       }
+    } else if (typeLower === 'subst') {
+      const playerIn = ev.assist?.name || playerName;
+      const playerOut = ev.assist?.name ? playerName : '';
+      timeline.push({
+        sortKey,
+        minute: clock,
+        side,
+        team: teamName,
+        kind: 'SUBST',
+        icon: '🔄',
+        title: playerOut ? `Cambio: entra ${playerIn} por ${playerOut}` : `Cambio: ${playerIn}`,
+        subtitle: teamName
+      });
+    } else if (typeLower === 'var') {
+      timeline.push({
+        sortKey,
+        minute: clock,
+        side,
+        team: teamName,
+        kind: 'VAR',
+        icon: '🖥️',
+        title: `VAR: ${translateSpanishLabels(ev.detail || 'Revisión')}`,
+        subtitle: `${teamName} • ${playerName}`
+      });
     }
   });
 
-  return { scorers, cards, penaltyShootout };
+  // Ordenar cronológicamente del más reciente al más antiguo para vista minuto a minuto
+  timeline.sort((a, b) => b.sortKey - a.sortKey);
+
+  return { scorers, cards, penaltyShootout, timeline };
 }
 
 function formatPastMatchApiFootball(ev, targetTeamId = VELEZ_ID) {
@@ -266,7 +394,7 @@ function formatPastMatchApiFootball(ev, targetTeamId = VELEZ_ID) {
   return {
     id: String(ev.fixture?.id || ''),
     fecha: cleanRoundLabel(ev.league?.round || 'LPF'),
-    comp: ev.league?.name || 'Liga Profesional Argentina',
+    comp: translateSpanishLabels(ev.league?.name || 'Liga Profesional Argentina'),
     date: d.toLocaleDateString('es-AR', { day: '2-digit', month: 'short', timeZone: 'America/Argentina/Buenos_Aires' }),
     rival: oppTeam?.name || 'Rival',
     rivalLogo: oppTeam?.logo || '',
@@ -359,14 +487,14 @@ function parseStandingsResponse(standingsResp = [], allLeagueFixtures = [], targ
     if (Array.isArray(leagueStandings[0])) {
       leagueStandings.forEach((groupRows, idx) => {
         const rawGroup = String(groupRows[0]?.group || `Grupo ${idx === 0 ? 'A' : 'B'}`);
-        const cleanGroup = cleanRoundLabel(rawGroup);
+        const cleanGroup = cleanGroupLabel(rawGroup);
         if (!isPlayoffRound(rawGroup) && !isAperturaLabel(rawGroup)) {
           candidateGroups.push({ name: cleanGroup, rows: groupRows });
         }
       });
     } else {
-      const rawGroup = String(leagueStandings[0]?.group || 'Torneo Clausura');
-      const cleanGroup = cleanRoundLabel(rawGroup);
+      const rawGroup = String(leagueStandings[0]?.group || 'Grupo A');
+      const cleanGroup = cleanGroupLabel(rawGroup);
       if (!isPlayoffRound(rawGroup) && !isAperturaLabel(rawGroup)) {
         candidateGroups.push({ name: cleanGroup, rows: leagueStandings });
       }
@@ -402,7 +530,7 @@ function parseStandingsResponse(standingsResp = [], allLeagueFixtures = [], targ
       dg,
       pts,
       cupType,
-      cupNote: r.description || '',
+      cupNote: translateSpanishLabels(r.description || ''),
       cupColor: null
     };
   };
@@ -413,12 +541,12 @@ function parseStandingsResponse(standingsResp = [], allLeagueFixtures = [], targ
   let grupoBName = 'Grupo B';
 
   if (candidateGroups.length >= 2) {
-    grupoAName = candidateGroups[0].name || 'Grupo A';
-    grupoBName = candidateGroups[1].name || 'Grupo B';
+    grupoAName = cleanGroupLabel(candidateGroups[0].name || 'Grupo A');
+    grupoBName = cleanGroupLabel(candidateGroups[1].name || 'Grupo B');
     standingsGrupoA = candidateGroups[0].rows.map(mapRow).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
     standingsGrupoB = candidateGroups[1].rows.map(mapRow).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
   } else if (candidateGroups.length === 1) {
-    grupoAName = candidateGroups[0].name || 'Grupo A';
+    grupoAName = cleanGroupLabel(candidateGroups[0].name || 'Grupo A');
     standingsGrupoA = candidateGroups[0].rows.map(mapRow).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
   }
 
@@ -434,6 +562,15 @@ function parseStandingsResponse(standingsResp = [], allLeagueFixtures = [], targ
     grupoBName,
     standingsAnual
   };
+}
+
+function detectActiveTournamentName(fixtures = [], standingsResp = []) {
+  const rounds = (fixtures || []).map(f => String(f.league?.round || ''));
+  const groups = (standingsResp[0]?.league?.standings || []).flat().map(r => String(r?.group || ''));
+  const allLabels = [...rounds, ...groups].join(' ');
+  if (/clausura|2nd phase/i.test(allLabels)) return 'Torneo Clausura';
+  if (/apertura|1st phase/i.test(allLabels)) return 'Torneo Apertura';
+  return translateSpanishLabels(standingsResp[0]?.league?.name || 'Liga Profesional');
 }
 
 async function fetchCurrentSquad() {
@@ -607,6 +744,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
     fetchCurrentSquad()
   ]);
 
+  const activeTournamentName = detectActiveTournamentName(fixtures, standingsResp);
+
   const sortedAsc = [...fixtures].sort(
     (a, b) => new Date(a.fixture?.date || 0).getTime() - new Date(b.fixture?.date || 0).getTime()
   );
@@ -633,7 +772,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
     const d = new Date(ev.fixture?.date);
     return {
       fecha: cleanRoundLabel(ev.league?.round || 'PRÓXIMO'),
-      comp: ev.league?.name || 'Liga Profesional Argentina',
+      comp: translateSpanishLabels(ev.league?.name || 'Liga Profesional Argentina'),
       isoDate: d.toISOString(),
       timestamp: d.getTime(),
       date: d.toLocaleDateString('es-AR', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'America/Argentina/Buenos_Aires' }),
@@ -662,6 +801,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
     const awayTeam = targetEv.teams?.away || {};
     const homeId = Number(homeTeam.id || 0);
     const awayId = Number(awayTeam.id || 0);
+    const homeNameStr = homeTeam.name || 'Local';
+    const awayNameStr = awayTeam.name || 'Visitante';
     const rivalTeam = homeId === VELEZ_ID ? awayTeam : homeTeam;
     const matchDateObj = new Date(targetEv.fixture?.date);
     const timestampMs = matchDateObj.getTime();
@@ -670,6 +811,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
     let scorers = { home: [], away: [] };
     let cards = { home: { yellow: [], red: [] }, away: { yellow: [], red: [] } };
     let penaltyShootout = { home: [], away: [] };
+    let timeline = [];
     let possessionObj = null;
 
     if (isLive || isFinishedTarget) {
@@ -679,10 +821,11 @@ async function computeVelezPayload(nowMs = Date.now()) {
           getFixtureStatisticsCached(targetEv.fixture.id, isLive)
         ]);
 
-        const parsedEv = parseEventsIntoScorersAndCards(evList, homeId, awayId);
+        const parsedEv = parseEventsIntoScorersAndCards(evList, homeId, awayId, homeNameStr, awayNameStr);
         scorers = parsedEv.scorers;
         cards = parsedEv.cards;
         penaltyShootout = parsedEv.penaltyShootout;
+        timeline = parsedEv.timeline;
 
         const velezBlock = (statsList || []).find(b => Number(b.team?.id) === VELEZ_ID);
         const rivalBlock = (statsList || []).find(b => Number(b.team?.id) !== VELEZ_ID);
@@ -722,8 +865,11 @@ async function computeVelezPayload(nowMs = Date.now()) {
     else if (isWithin24HoursPostMatch) matchMode = 'FINISHED_24H';
     else if (useLastAsReference) matchMode = 'LAST_REFERENCE';
 
+    const statusShortRaw = String(targetEv.fixture?.status?.short || '');
     const elapsedLabel = isLive
-      ? (targetEv.fixture?.status?.elapsed ? `${targetEv.fixture.status.elapsed}'` : 'EN JUEGO')
+      ? (statusShortRaw === 'HT'
+          ? 'ENTRETIEMPO'
+          : (targetEv.fixture?.status?.elapsed ? `${targetEv.fixture.status.elapsed}'` : 'EN JUEGO'))
       : '';
 
     currentMatch = {
@@ -737,8 +883,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
       rivalLastMatches: [],
       match: {
         teams: {
-          home: { id: homeId, name: homeTeam.name || 'Local', logo: homeTeam.logo || '' },
-          away: { id: awayId, name: awayTeam.name || 'Visitante', logo: awayTeam.logo || '' }
+          home: { id: homeId, name: homeNameStr, logo: homeTeam.logo || '' },
+          away: { id: awayId, name: awayNameStr, logo: awayTeam.logo || '' }
         },
         goals: {
           home: targetEv.goals?.home ?? 0,
@@ -748,6 +894,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
         scorers,
         cards,
         penaltyShootout,
+        timeline,
         possession: possessionObj,
         fixture: {
           date: isoDateStrict,
@@ -761,7 +908,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
           }
         },
         league: {
-          name: targetEv.league?.name || 'Liga Profesional Argentina',
+          name: translateSpanishLabels(targetEv.league?.name || 'Liga Profesional Argentina'),
           round: cleanRoundLabel(targetEv.league?.round || '')
         }
       }
@@ -784,6 +931,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
         scorers: { home: [], away: [] },
         cards: { home: { yellow: [], red: [] }, away: { yellow: [], red: [] } },
         penaltyShootout: { home: [], away: [] },
+        timeline: [],
         possession: null,
         fixture: {
           date: null,
@@ -839,7 +987,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
 
   return {
     velezApiFootballId: VELEZ_ID,
-    activeTournamentName: 'Torneo Clausura',
+    activeTournamentName,
     grupoAName: standingsParsed.grupoAName,
     grupoBName: standingsParsed.grupoBName,
     currentMatch,
@@ -890,7 +1038,7 @@ async function computeVelezTournamentFixture() {
             getFixtureStatisticsCached(ev.fixture.id, status === 'LIVE')
           ]);
 
-          const parsedEv = parseEventsIntoScorersAndCards(evList, homeId, awayId);
+          const parsedEv = parseEventsIntoScorersAndCards(evList, homeId, awayId, homeTeam.name, awayTeam.name);
           scorers = parsedEv.scorers;
 
           const homeBlock = (statsList || []).find(b => Number(b.team?.id) === homeId);
@@ -911,7 +1059,7 @@ async function computeVelezTournamentFixture() {
         isoDate: d.toISOString(),
         timestamp: d.getTime(),
         round: cleanRoundLabel(ev.league?.round || 'Fecha'),
-        comp: ev.league?.name || 'Liga Profesional Argentina',
+        comp: translateSpanishLabels(ev.league?.name || 'Liga Profesional Argentina'),
         stadium: ev.fixture?.venue?.name || (isVelezHome ? 'Estadio José Amalfitani' : 'Estadio a confirmar'),
         cond: isVelezHome ? 'L' : 'V',
         home: {
