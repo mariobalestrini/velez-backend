@@ -765,6 +765,7 @@ async function fetchCurrentSquad(season) {
       const countryInfo = mapCountryToIso(player.nationality);
       metaById.set(id, {
         age: calculatePlayerAge(player),
+        height: rawHeight || null,
         countryCode: countryInfo.code,
         countryName: countryInfo.label,
         flagUrl: `https://flagcdn.com/w80/${countryInfo.code}.png`,
@@ -795,6 +796,7 @@ async function fetchCurrentSquad(season) {
       name: p.name || 'Jugador',
       shortName: p.name || 'Jugador',
       age: meta.age,
+      height: meta.height || null,
       number: num,
       dorsal: num,
       jersey: num,
