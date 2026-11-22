@@ -49,6 +49,23 @@ function isAperturaLabel(str = '') {
   return /\b1st phase\b|\bapertura\b/i.test(String(str));
 }
 
+function calculatePlayerAge(player = {}) {
+  if (player.birth && player.birth.date) {
+    const birthDate = new Date(player.birth.date);
+    if (!Number.isNaN(birthDate.getTime())) {
+      const today = new Date();
+      let age = today.getFullYear() - birthDate.getFullYear();
+      const monthDiff = today.getMonth() - birthDate.getMonth();
+      if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+        age--;
+      }
+      return age > 0 ? age : 0;
+    }
+  }
+  const rawAge = Number(player.age || 0);
+  return rawAge > 0 ? rawAge + 1 : 0;
+}
+
 function mapPosition(posName, posAbbr) {
   const name = String(posName || '').toLowerCase();
   const abbr = String(posAbbr || '').toUpperCase();
@@ -193,17 +210,23 @@ function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId)
       commentsLower.includes('shootout') ||
       commentsLower.includes('penalty shootout') ||
       detailLower.includes('shootout') ||
-      (minuteElapsed >= 120 && (detailLower.includes('penalty') || detailLower.includes('missed')));
+      (minuteElapsed >= 118 && (detailLower.includes('penalty') || detailLower.includes('missed') || detailLower.includes('saved')));
 
     if (isShootoutEvent) {
-      const scored =
-        typeLower === 'goal' ||
-        detailLower === 'penalty' ||
-        (!detailLower.includes('missed') && !detailLower.includes('saved') && !detailLower.includes('no goal'));
+      const missedOrSaved =
+        detailLower.includes('missed') ||
+        detailLower.includes('saved') ||
+        detailLower.includes('no goal') ||
+        detailLower.includes('errado') ||
+        detailLower.includes('atajado') ||
+        commentsLower.includes('missed') ||
+        commentsLower.includes('saved');
+
+      const scored = !missedOrSaved && (typeLower === 'goal' || detailLower === 'penalty' || detailLower.includes('scored'));
 
       penaltyShootout[side].push({
         player: playerName,
-        scored,
+        scored: Boolean(scored),
         minute: clock
       });
       return;
@@ -428,7 +451,7 @@ async function fetchCurrentSquad() {
       if (!id) return;
       const countryInfo = mapCountryToIso(player.nationality);
       metaById.set(id, {
-        age: Number(player.age || 0),
+        age: calculatePlayerAge(player),
         countryCode: countryInfo.code,
         countryName: countryInfo.label,
         flagUrl: `https://flagcdn.com/w80/${countryInfo.code}.png`,
@@ -446,7 +469,7 @@ async function fetchCurrentSquad() {
     const id = Number(p.id || 0);
     const posInfo = mapPosition(p.position, '');
     const meta = metaById.get(id) || {
-      age: Number(p.age || 0),
+      age: calculatePlayerAge(p),
       countryCode: 'ar',
       countryName: 'Argentina',
       flagUrl: 'https://flagcdn.com/w80/ar.png',
@@ -541,7 +564,7 @@ async function computeClausuraSquadStats(baseSquad, finishedMatches) {
       const isShootout =
         commentsLower.includes('shootout') ||
         detailLower.includes('shootout') ||
-        (minElapsed >= 120 && (detailLower.includes('penalty') || detailLower.includes('missed')));
+        (minElapsed >= 118 && (detailLower.includes('penalty') || detailLower.includes('missed') || detailLower.includes('saved')));
 
       if (pid && (typeLower === 'subst' || typeLower === 'goal' || typeLower === 'card')) {
         matchPlayersSet.add(pid);
@@ -846,38 +869,67 @@ async function computeVelezTournamentFixture() {
   const finishedCodes = ['FT', 'AET', 'PEN'];
   const liveCodes = ['1H', 'HT', '2H', 'ET', 'BT', 'P', 'LIVE'];
 
-  const matches = sortedDesc.map(ev => {
-    const code = ev.fixture?.status?.short || 'NS';
-    const status = finishedCodes.includes(code) ? 'FINISHED' : (liveCodes.includes(code) ? 'LIVE' : 'UPCOMING');
-    const homeTeam = ev.teams?.home || {};
-    const awayTeam = ev.teams?.away || {};
-    const isVelezHome = Number(homeTeam.id) === VELEZ_ID;
-    const d = new Date(ev.fixture?.date);
+  const matches = await Promise.all(
+    sortedDesc.map(async (ev) => {
+      const code = ev.fixture?.status?.short || 'NS';
+      const status = finishedCodes.includes(code) ? 'FINISHED' : (liveCodes.includes(code) ? 'LIVE' : 'UPCOMING');
+      const homeTeam = ev.teams?.home || {};
+      const awayTeam = ev.teams?.away || {};
+      const homeId = Number(homeTeam.id || 0);
+      const awayId = Number(awayTeam.id || 0);
+      const isVelezHome = homeId === VELEZ_ID;
+      const d = new Date(ev.fixture?.date);
 
-    return {
-      id: String(ev.fixture?.id || ''),
-      status,
-      isoDate: d.toISOString(),
-      timestamp: d.getTime(),
-      round: cleanRoundLabel(ev.league?.round || 'Fecha'),
-      comp: ev.league?.name || 'Liga Profesional Argentina',
-      stadium: ev.fixture?.venue?.name || (isVelezHome ? 'Estadio José Amalfitani' : 'Estadio a confirmar'),
-      cond: isVelezHome ? 'L' : 'V',
-      home: {
-        name: homeTeam.name || 'Local',
-        logo: homeTeam.logo || '',
-        goals: status === 'UPCOMING' ? null : (ev.goals?.home ?? 0)
-      },
-      away: {
-        name: awayTeam.name || 'Visitante',
-        logo: awayTeam.logo || '',
-        goals: status === 'UPCOMING' ? null : (ev.goals?.away ?? 0)
-      },
-      penalties: ev.score?.penalty || null,
-      scorers: { home: [], away: [] },
-      possession: null
-    };
-  });
+      let scorers = { home: [], away: [] };
+      let possession = null;
+
+      if ((status === 'FINISHED' || status === 'LIVE') && ev.fixture?.id) {
+        try {
+          const [evList, statsList] = await Promise.all([
+            getFixtureEventsCached(ev.fixture.id, status === 'LIVE'),
+            getFixtureStatisticsCached(ev.fixture.id, status === 'LIVE')
+          ]);
+
+          const parsedEv = parseEventsIntoScorersAndCards(evList, homeId, awayId);
+          scorers = parsedEv.scorers;
+
+          const homeBlock = (statsList || []).find(b => Number(b.team?.id) === homeId);
+          const awayBlock = (statsList || []).find(b => Number(b.team?.id) === awayId);
+          const hPoss = getStatValue(homeBlock?.statistics || [], 'Ball Possession');
+          const aPoss = getStatValue(awayBlock?.statistics || [], 'Ball Possession');
+          if (hPoss !== null && aPoss !== null) {
+            possession = { home: Math.round(hPoss), away: Math.round(aPoss) };
+          }
+        } catch (err) {
+          // Si un partido no tiene eventos/estadísticas disponibles, queda en vacío
+        }
+      }
+
+      return {
+        id: String(ev.fixture?.id || ''),
+        status,
+        isoDate: d.toISOString(),
+        timestamp: d.getTime(),
+        round: cleanRoundLabel(ev.league?.round || 'Fecha'),
+        comp: ev.league?.name || 'Liga Profesional Argentina',
+        stadium: ev.fixture?.venue?.name || (isVelezHome ? 'Estadio José Amalfitani' : 'Estadio a confirmar'),
+        cond: isVelezHome ? 'L' : 'V',
+        home: {
+          name: homeTeam.name || 'Local',
+          logo: homeTeam.logo || '',
+          goals: status === 'UPCOMING' ? null : (ev.goals?.home ?? 0)
+        },
+        away: {
+          name: awayTeam.name || 'Visitante',
+          logo: awayTeam.logo || '',
+          goals: status === 'UPCOMING' ? null : (ev.goals?.away ?? 0)
+        },
+        penalties: ev.score?.penalty || null,
+        scorers,
+        possession
+      };
+    })
+  );
 
   return {
     tournamentName: 'Torneo Clausura',
