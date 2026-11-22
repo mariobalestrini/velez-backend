@@ -241,6 +241,95 @@ function getStatValue(statsList = [], typeName) {
   return Number.isNaN(num) ? null : num;
 }
 
+function getRawStatDisplay(statsList = [], typeName) {
+  const found = (statsList || []).find(s => s.type === typeName);
+  if (!found || found.value === null || found.value === undefined) return '0';
+  return String(found.value);
+}
+
+function buildMatchStatisticsComparison(statsList = [], homeId, awayId) {
+  const homeBlock = (statsList || []).find(b => Number(b.team?.id) === Number(homeId));
+  const awayBlock = (statsList || []).find(b => Number(b.team?.id) === Number(awayId));
+  if (!homeBlock && !awayBlock) return [];
+
+  const hStats = homeBlock?.statistics || [];
+  const aStats = awayBlock?.statistics || [];
+
+  const definitions = [
+    { type: 'Shots on Goal', label: 'Tiros al arco' },
+    { type: 'Shots off Goal', label: 'Tiros desviados' },
+    { type: 'Total Shots', label: 'Remates totales' },
+    { type: 'Blocked Shots', label: 'Tiros bloqueados' },
+    { type: 'Shots insidebox', label: 'Remates dentro del área' },
+    { type: 'Shots outsidebox', label: 'Remates fuera del área' },
+    { type: 'Fouls', label: 'Faltas' },
+    { type: 'Corner Kicks', label: 'Tiros de esquina' },
+    { type: 'Offsides', label: 'Fueras de juego' },
+    { type: 'Ball Possession', label: 'Posesión' },
+    { type: 'Yellow Cards', label: 'Tarjetas amarillas' },
+    { type: 'Red Cards', label: 'Tarjetas rojas' },
+    { type: 'Goalkeeper Saves', label: 'Atajadas del arquero' }
+  ];
+
+  return definitions
+    .map(def => {
+      const hRaw = getRawStatDisplay(hStats, def.type);
+      const aRaw = getRawStatDisplay(aStats, def.type);
+      const hNum = getStatValue(hStats, def.type);
+      const aNum = getStatValue(aStats, def.type);
+      if (hNum === null && aNum === null) return null;
+
+      return {
+        type: def.type,
+        label: def.label,
+        home: hRaw,
+        away: aRaw,
+        homeNum: hNum ?? 0,
+        awayNum: aNum ?? 0
+      };
+    })
+    .filter(Boolean);
+}
+
+function parseMatchLineupsForView(lineupsResp = [], homeId, awayId) {
+  const mapSide = (block) => {
+    if (!block) return null;
+    return {
+      teamId: Number(block.team?.id || 0),
+      teamName: block.team?.name || '',
+      teamLogo: block.team?.logo || '',
+      coach: block.coach?.name || '',
+      formation: block.formation || '4-2-3-1',
+      startXI: (block.startXI || []).map(entry => {
+        const pl = entry.player || {};
+        return {
+          id: Number(pl.id || 0),
+          name: pl.name || 'Jugador',
+          number: Number(pl.number || 0) || '-',
+          pos: pl.pos || ''
+        };
+      }),
+      substitutes: (block.substitutes || []).map(entry => {
+        const pl = entry.player || {};
+        return {
+          id: Number(pl.id || 0),
+          name: pl.name || 'Jugador',
+          number: Number(pl.number || 0) || '-',
+          pos: pl.pos || ''
+        };
+      })
+    };
+  };
+
+  const homeBlock = (lineupsResp || []).find(item => Number(item.team?.id) === Number(homeId)) || (lineupsResp || [])[0] || null;
+  const awayBlock = (lineupsResp || []).find(item => Number(item.team?.id) === Number(awayId)) || (lineupsResp || [])[1] || null;
+
+  return {
+    home: mapSide(homeBlock),
+    away: mapSide(awayBlock)
+  };
+}
+
 async function getFixtureStatisticsCached(fixtureId, isLive = false) {
   const key = String(fixtureId);
   const cached = statsCacheByFixture.get(key);
@@ -886,13 +975,16 @@ async function computeVelezPayload(nowMs = Date.now()) {
     let cards = { home: { yellow: [], red: [] }, away: { yellow: [], red: [] } };
     let penaltyShootout = { home: [], away: [] };
     let timeline = [];
+    let matchStatistics = [];
+    let matchLineups = { home: null, away: null };
     let possessionObj = null;
 
     if (isLive || isFinishedTarget) {
       try {
-        const [evList, statsList] = await Promise.all([
+        const [evList, statsList, lineupsResp] = await Promise.all([
           getFixtureEventsCached(targetEv.fixture.id, isLive),
-          getFixtureStatisticsCached(targetEv.fixture.id, isLive)
+          getFixtureStatisticsCached(targetEv.fixture.id, isLive),
+          getFixtureLineupsCached(targetEv.fixture.id).catch(() => [])
         ]);
 
         const parsedEv = parseEventsIntoScorersAndCards(evList, homeId, awayId, homeNameStr, awayNameStr);
@@ -900,6 +992,9 @@ async function computeVelezPayload(nowMs = Date.now()) {
         cards = parsedEv.cards;
         penaltyShootout = parsedEv.penaltyShootout;
         timeline = parsedEv.timeline;
+
+        matchStatistics = buildMatchStatisticsComparison(statsList, homeId, awayId);
+        matchLineups = parseMatchLineupsForView(lineupsResp, homeId, awayId);
 
         const velezBlock = (statsList || []).find(b => Number(b.team?.id) === VELEZ_ID);
         const rivalBlock = (statsList || []).find(b => Number(b.team?.id) !== VELEZ_ID);
@@ -969,6 +1064,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
         cards,
         penaltyShootout,
         timeline,
+        statistics: matchStatistics,
+        lineups: matchLineups,
         possession: possessionObj,
         fixture: {
           date: isoDateStrict,
@@ -1007,6 +1104,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
         cards: { home: { yellow: [], red: [] }, away: { yellow: [], red: [] } },
         penaltyShootout: { home: [], away: [] },
         timeline: [],
+        statistics: [],
+        lineups: { home: null, away: null },
         possession: null,
         fixture: {
           date: null,
