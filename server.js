@@ -1236,17 +1236,29 @@ async function computeVelezTournamentFixture() {
       const d = new Date(ev.fixture?.date);
 
       let scorers = { home: [], away: [] };
+      let cards = { home: { yellow: [], red: [] }, away: { yellow: [], red: [] } };
+      let substitutions = { home: [], away: [] };
+      let penaltyShootout = { home: [], away: [] };
+      let statistics = [];
+      let lineups = { home: null, away: null };
       let possession = null;
 
       if ((status === 'FINISHED' || status === 'LIVE') && ev.fixture?.id) {
         try {
-          const [evList, statsList] = await Promise.all([
+          const [evList, statsList, lineupsResp] = await Promise.all([
             getFixtureEventsCached(ev.fixture.id, status === 'LIVE'),
-            getFixtureStatisticsCached(ev.fixture.id, status === 'LIVE')
+            getFixtureStatisticsCached(ev.fixture.id, status === 'LIVE'),
+            getFixtureLineupsCached(ev.fixture.id).catch(() => [])
           ]);
 
           const parsedEv = parseEventsIntoScorersAndCards(evList, homeId, awayId, homeName, awayName);
           scorers = parsedEv.scorers;
+          cards = parsedEv.cards;
+          substitutions = parsedEv.substitutions;
+          penaltyShootout = parsedEv.penaltyShootout;
+
+          statistics = buildMatchStatisticsComparison(statsList, homeId, awayId);
+          lineups = parseMatchLineupsForView(lineupsResp, homeId, awayId);
 
           const homeBlock = (statsList || []).find(b => Number(b.team?.id) === homeId);
           const awayBlock = (statsList || []).find(b => Number(b.team?.id) === awayId);
@@ -1282,6 +1294,11 @@ async function computeVelezTournamentFixture() {
         },
         penalties: ev.score?.penalty || null,
         scorers,
+        cards,
+        substitutions,
+        penaltyShootout,
+        statistics,
+        lineups,
         possession
       };
     })
