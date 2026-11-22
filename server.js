@@ -49,13 +49,6 @@ function isAperturaLabel(str = '') {
   return /\b1st phase\b|\bapertura\b/i.test(String(str));
 }
 
-function isClausuraRegularRound(roundStr = '') {
-  const r = String(roundStr || '');
-  if (!r) return false;
-  if (isPlayoffRound(r) || isAperturaLabel(r)) return false;
-  return /2nd phase|clausura|regular|fecha\s*\d+|group\s*[ab]/i.test(r);
-}
-
 function mapPosition(posName, posAbbr) {
   const name = String(posName || '').toLowerCase();
   const abbr = String(posAbbr || '').toUpperCase();
@@ -249,7 +242,77 @@ function formatPastMatchApiFootball(ev, targetTeamId = VELEZ_ID) {
   };
 }
 
-function parseStandingsResponse(standingsResp = [], targetTeamId = VELEZ_ID) {
+function buildAnnualStandingsFromLeagueFixtures(allLeagueFixtures = [], targetTeamId = VELEZ_ID) {
+  const finishedStatuses = ['FT', 'AET', 'PEN'];
+  const regularYearMatches = (allLeagueFixtures || []).filter(f =>
+    finishedStatuses.includes(f.fixture?.status?.short) &&
+    !isPlayoffRound(f.league?.round)
+  );
+
+  const map = new Map();
+  const ensureTeam = (teamObj) => {
+    if (!teamObj?.id) return null;
+    const id = String(teamObj.id);
+    if (!map.has(id)) {
+      map.set(id, {
+        id,
+        name: teamObj.name || 'Equipo',
+        logo: teamObj.logo || '',
+        isVelez: Number(teamObj.id) === Number(targetTeamId),
+        pj: 0,
+        pg: 0,
+        pe: 0,
+        pp: 0,
+        gf: 0,
+        gc: 0,
+        dg: 0,
+        pts: 0,
+        cupType: null,
+        cupNote: '',
+        cupColor: null
+      });
+    }
+    return map.get(id);
+  };
+
+  regularYearMatches.forEach(f => {
+    const homeRow = ensureTeam(f.teams?.home);
+    const awayRow = ensureTeam(f.teams?.away);
+    if (!homeRow || !awayRow) return;
+
+    const gh = Number(f.goals?.home ?? 0);
+    const ga = Number(f.goals?.away ?? 0);
+
+    homeRow.pj += 1;
+    awayRow.pj += 1;
+    homeRow.gf += gh;
+    homeRow.gc += ga;
+    awayRow.gf += ga;
+    awayRow.gc += gh;
+
+    if (gh > ga) {
+      homeRow.pg += 1;
+      homeRow.pts += 3;
+      awayRow.pp += 1;
+    } else if (ga > gh) {
+      awayRow.pg += 1;
+      awayRow.pts += 3;
+      homeRow.pp += 1;
+    } else {
+      homeRow.pe += 1;
+      awayRow.pe += 1;
+      homeRow.pts += 1;
+      awayRow.pts += 1;
+    }
+
+    homeRow.dg = homeRow.gf - homeRow.gc;
+    awayRow.dg = awayRow.gf - awayRow.gc;
+  });
+
+  return Array.from(map.values()).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
+}
+
+function parseStandingsResponse(standingsResp = [], allLeagueFixtures = [], targetTeamId = VELEZ_ID) {
   const leagueStandings = standingsResp[0]?.league?.standings || [];
   const candidateGroups = [];
 
@@ -320,9 +383,9 @@ function parseStandingsResponse(standingsResp = [], targetTeamId = VELEZ_ID) {
     standingsGrupoA = candidateGroups[0].rows.map(mapRow).sort((a, b) => b.pts - a.pts || b.dg - a.dg || b.gf - a.gf);
   }
 
-  const velezInA = standingsGrupoA.some(t => t.isVelez);
   const velezInB = standingsGrupoB.some(t => t.isVelez);
-  const standingsClausura = velezInB ? standingsGrupoB : (velezInA ? standingsGrupoA : standingsGrupoA);
+  const standingsClausura = velezInB ? standingsGrupoB : standingsGrupoA;
+  const standingsAnual = buildAnnualStandingsFromLeagueFixtures(allLeagueFixtures, targetTeamId);
 
   return {
     standingsClausura,
@@ -330,12 +393,13 @@ function parseStandingsResponse(standingsResp = [], targetTeamId = VELEZ_ID) {
     standingsGrupoB,
     grupoAName,
     grupoBName,
-    standingsAnual: []
+    standingsAnual
   };
 }
 
-async function fetchBaseSquad() {
-  const mapById = new Map();
+// Obtiene el plantel actual registrado para Vélez en API-Football (/players/squads)
+async function fetchCurrentSquad() {
+  const metaById = new Map();
 
   try {
     const playersResp = await apiFootballGet('/players', {
@@ -343,85 +407,60 @@ async function fetchBaseSquad() {
       league: LIGA_ARG_ID,
       season: SEASON
     });
-
     (playersResp || []).forEach(entry => {
       const player = entry.player || {};
-      const statBlock = (entry.statistics || []).find(s => Number(s.league?.id) === LIGA_ARG_ID) || entry.statistics?.[0] || {};
       const id = Number(player.id || 0);
       if (!id) return;
-      const posInfo = mapPosition(statBlock.games?.position || player.position, '');
       const countryInfo = mapCountryToIso(player.nationality);
-      mapById.set(id, {
-        id,
-        name: player.name || 'Jugador',
-        shortName: player.lastname || player.name || 'Jugador',
+      metaById.set(id, {
         age: Number(player.age || 0),
-        number: Number(statBlock.games?.number ?? player.number ?? 0) || null,
-        dorsal: Number(statBlock.games?.number ?? player.number ?? 0) || null,
-        jersey: Number(statBlock.games?.number ?? player.number ?? 0) || null,
-        position: posInfo.posLabel,
-        posLabel: posInfo.posLabel,
-        group: posInfo.group,
         countryCode: countryInfo.code,
         countryName: countryInfo.label,
         flagUrl: `https://flagcdn.com/w80/${countryInfo.code}.png`,
-        photo: player.photo || '',
-        pj: 0,
-        goals: 0,
-        cleanSheets: posInfo.group === 'ARQ' ? 0 : null,
-        yellowCards: 0,
-        redCards: 0
+        photo: player.photo || ''
       });
     });
   } catch (err) {
-    console.warn('Error leyendo /players:', err.message);
+    // Continuar con /players/squads
   }
 
-  try {
-    const squadsResp = await apiFootballGet('/players/squads', { team: VELEZ_ID });
-    const list = squadsResp[0]?.players || [];
-    list.forEach(p => {
-      const id = Number(p.id || 0);
-      if (!id) return;
-      const posInfo = mapPosition(p.position, '');
-      const existing = mapById.get(id);
-      if (existing) {
-        existing.number = existing.number || Number(p.number || 0) || null;
-        existing.dorsal = existing.number;
-        existing.jersey = existing.number;
-        existing.group = posInfo.group || existing.group;
-        existing.posLabel = posInfo.posLabel || existing.posLabel;
-        existing.position = existing.posLabel;
-        existing.cleanSheets = existing.group === 'ARQ' ? 0 : null;
-      } else {
-        mapById.set(id, {
-          id,
-          name: p.name || 'Jugador',
-          shortName: p.name || 'Jugador',
-          age: Number(p.age || 0),
-          number: Number(p.number || 0) || null,
-          dorsal: Number(p.number || 0) || null,
-          jersey: Number(p.number || 0) || null,
-          position: posInfo.posLabel,
-          posLabel: posInfo.posLabel,
-          group: posInfo.group,
-          countryCode: 'ar',
-          countryName: 'Argentina',
-          flagUrl: 'https://flagcdn.com/w80/ar.png',
-          photo: p.photo || '',
-          pj: 0,
-          goals: 0,
-          cleanSheets: posInfo.group === 'ARQ' ? 0 : null,
-          yellowCards: 0,
-          redCards: 0
-        });
-      }
-    });
-  } catch (err) {
-    console.warn('Error leyendo /players/squads:', err.message);
-  }
+  const squadsResp = await apiFootballGet('/players/squads', { team: VELEZ_ID });
+  const currentList = squadsResp[0]?.players || [];
 
-  return Array.from(mapById.values());
+  return currentList.map(p => {
+    const id = Number(p.id || 0);
+    const posInfo = mapPosition(p.position, '');
+    const meta = metaById.get(id) || {
+      age: Number(p.age || 0),
+      countryCode: 'ar',
+      countryName: 'Argentina',
+      flagUrl: 'https://flagcdn.com/w80/ar.png',
+      photo: p.photo || ''
+    };
+    const num = Number(p.number || 0) || null;
+
+    return {
+      id,
+      name: p.name || 'Jugador',
+      shortName: p.name || 'Jugador',
+      age: meta.age,
+      number: num,
+      dorsal: num,
+      jersey: num,
+      position: posInfo.posLabel,
+      posLabel: posInfo.posLabel,
+      group: posInfo.group,
+      countryCode: meta.countryCode,
+      countryName: meta.countryName,
+      flagUrl: meta.flagUrl,
+      photo: p.photo || meta.photo || '',
+      pj: 0,
+      goals: 0,
+      cleanSheets: posInfo.group === 'ARQ' ? 0 : null,
+      yellowCards: 0,
+      redCards: 0
+    };
+  });
 }
 
 async function computeClausuraSquadStats(baseSquad, finishedMatches) {
@@ -510,10 +549,11 @@ async function computeClausuraSquadStats(baseSquad, finishedMatches) {
 }
 
 async function computeVelezPayload(nowMs = Date.now()) {
-  const [fixtures, standingsResp, baseSquad] = await Promise.all([
+  const [fixtures, allLeagueFixtures, standingsResp, baseSquad] = await Promise.all([
     apiFootballGet('/fixtures', { team: VELEZ_ID, league: LIGA_ARG_ID, season: SEASON }),
+    apiFootballGet('/fixtures', { league: LIGA_ARG_ID, season: SEASON }),
     apiFootballGet('/standings', { league: LIGA_ARG_ID, season: SEASON }),
-    fetchBaseSquad()
+    fetchCurrentSquad()
   ]);
 
   const sortedAsc = [...fixtures].sort(
@@ -740,7 +780,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
   }
 
   const lastLineup = recentLineups[0] || { formation: '4-2-3-1', rival: '', date: '', starters: [] };
-  const standingsParsed = parseStandingsResponse(standingsResp, VELEZ_ID);
+  const standingsParsed = parseStandingsResponse(standingsResp, allLeagueFixtures, VELEZ_ID);
 
   return {
     velezApiFootballId: VELEZ_ID,
