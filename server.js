@@ -175,6 +175,44 @@ function mapCountryToIso(countryRaw) {
   return { code: 'ar', label: countryRaw || 'Argentina' };
 }
 
+function extractPlayerTechStats(playerEntry = {}) {
+  const statsArr = Array.isArray(playerEntry.statistics) ? playerEntry.statistics : [];
+  const mainStat = statsArr.find(s => Number(s.league?.id) === LIGA_ARG_ID) || statsArr[0] || {};
+  const games = mainStat.games || {};
+  const goals = mainStat.goals || {};
+  const shots = mainStat.shots || {};
+  const passes = mainStat.passes || {};
+  const tackles = mainStat.tackles || {};
+  const dribbles = mainStat.dribbles || {};
+  const fouls = mainStat.fouls || {};
+  const penalty = mainStat.penalty || {};
+  const subs = mainStat.substitutes || {};
+
+  const accRaw = passes.accuracy;
+  const accuracyNum = typeof accRaw === 'string'
+    ? Number(accRaw.replace('%', '').trim())
+    : Number(accRaw || 0);
+
+  return {
+    foot: playerEntry.player?.foot || '',
+    minutes: Number(games.minutes || 0),
+    lineups: Number(games.lineups || 0),
+    subIn: Number(subs.in || 0),
+    assists: Number(goals.assists || 0),
+    conceded: Number(goals.conceded || 0),
+    penScored: Number(penalty.scored || 0),
+    penMissed: Number(penalty.missed || 0),
+    foulsCommitted: Number(fouls.committed || 0),
+    foulsDrawn: Number(fouls.drawn || 0),
+    shotsTotal: Number(shots.total || 0),
+    shotsOn: Number(shots.on || 0),
+    dribblesAttempts: Number(dribbles.attempts || 0),
+    dribblesSuccess: Number(dribbles.success || 0),
+    passAccuracy: Number.isNaN(accuracyNum) ? 0 : Math.round(accuracyNum),
+    tacklesTotal: Number(tackles.total || 0)
+  };
+}
+
 async function apiFootballGet(path, params = {}) {
   if (!API_KEY) {
     throw new Error('Falta configurar API_FOOTBALL_KEY en Render');
@@ -774,7 +812,8 @@ async function fetchCurrentSquad(season) {
         countryCode: countryInfo.code,
         countryName: countryInfo.label,
         flagUrl: `https://flagcdn.com/w80/${countryInfo.code}.png`,
-        photo: player.photo || ''
+        photo: player.photo || '',
+        techStats: extractPlayerTechStats(entry)
       });
     });
   } catch (err) {
@@ -793,7 +832,8 @@ async function fetchCurrentSquad(season) {
       countryCode: 'ar',
       countryName: 'Argentina',
       flagUrl: 'https://flagcdn.com/w80/ar.png',
-      photo: p.photo || ''
+      photo: p.photo || '',
+      techStats: null
     };
     const num = Number(p.number || 0) || null;
 
@@ -803,6 +843,8 @@ async function fetchCurrentSquad(season) {
       shortName: p.name || 'Jugador',
       age: meta.age,
       height: meta.height || null,
+      foot: meta.techStats?.foot || '',
+      techStats: meta.techStats || null,
       number: num,
       dorsal: num,
       jersey: num,
