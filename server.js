@@ -1068,18 +1068,22 @@ async function computeVelezPayload(nowMs = Date.now()) {
     const isHome = Number(ev.teams?.home?.id) === VELEZ_ID;
     const rivalTeam = isHome ? ev.teams?.away : ev.teams?.home;
     const d = new Date(ev.fixture?.date);
+    const rawCode = String(ev.fixture?.status?.short || 'NS');
+    const isTbd = rawCode === 'TBD';
     return {
       leagueId: Number(ev.league?.id || LIGA_ARG_ID),
       fecha: cleanRoundLabel(ev.league?.round || 'PRÓXIMO'),
       comp: getCompetitionDisplayName(ev.league),
       isoDate: d.toISOString(),
       timestamp: d.getTime(),
-      date: d.toLocaleDateString('es-AR', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'America/Argentina/Buenos_Aires' }),
-      timeART: d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Argentina/Buenos_Aires' }) + ' ART',
+      date: isTbd ? 'A confirmar' : d.toLocaleDateString('es-AR', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'America/Argentina/Buenos_Aires' }),
+      timeART: isTbd ? 'A confirmar' : d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Argentina/Buenos_Aires' }) + ' ART',
       rival: formatVelezName(rivalTeam?.name || 'Rival'),
       rivalLogo: rivalTeam?.logo || '',
       cond: isHome ? 'L' : 'V',
-      stadium: ev.fixture?.venue?.name || (isHome ? 'Estadio José Amalfitani' : 'Estadio a confirmar')
+      stadium: ev.fixture?.venue?.name || (isHome ? 'Estadio José Amalfitani' : 'Estadio a confirmar'),
+      apiStatusShort: rawCode,
+      tentativeDate: isTbd
     };
   });
 
@@ -1097,6 +1101,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
   if (targetEv) {
     const isLive = Boolean(liveMatchRaw && Number(targetEv.fixture?.id) === Number(liveMatchRaw.fixture?.id));
     const isFinishedTarget = finishedCodes.includes(targetEv.fixture?.status?.short);
+    const statusShortRaw = String(targetEv.fixture?.status?.short || '');
+    const isTargetTbd = !isLive && !isFinishedTarget && statusShortRaw === 'TBD';
     const homeTeam = targetEv.teams?.home || {};
     const awayTeam = targetEv.teams?.away || {};
     const homeId = Number(homeTeam.id || 0);
@@ -1178,7 +1184,6 @@ async function computeVelezPayload(nowMs = Date.now()) {
     else if (isWithin24HoursPostMatch) matchMode = 'FINISHED_24H';
     else if (useLastAsReference) matchMode = 'LAST_REFERENCE';
 
-    const statusShortRaw = String(targetEv.fixture?.status?.short || '');
     const elapsedLabel = isLive
       ? (statusShortRaw === 'HT'
           ? 'ENTRETIEMPO'
@@ -1189,6 +1194,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
       type: matchMode,
       timestamp: timestampMs,
       isoDate: isoDateStrict,
+      apiStatusShort: statusShortRaw || 'NS',
+      tentativeDate: isTargetTbd,
       penalties: targetEv.score?.penalty || null,
       velezForm: velezLast2,
       rivalForm: rivalLast2,
@@ -1218,8 +1225,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
           timestampMs,
           venue: { name: targetEv.fixture?.venue?.name || 'Estadio José Amalfitani' },
           status: {
-            short: isLive ? 'LIVE' : (isFinishedTarget ? 'FT' : 'NS'),
-            long: targetEv.fixture?.status?.long || 'Programado',
+            short: isLive ? 'LIVE' : (isFinishedTarget ? 'FT' : (isTargetTbd ? 'TBD' : 'NS')),
+            long: isTargetTbd ? 'Fecha a confirmar' : (targetEv.fixture?.status?.long || 'Programado'),
             elapsed: elapsedLabel
           }
         },
@@ -1235,6 +1242,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
       type: 'TBD',
       timestamp: null,
       isoDate: null,
+      apiStatusShort: 'TBD',
+      tentativeDate: true,
       velezForm: velezLast2,
       rivalForm: [],
       velezLastMatches: velezLast2,
@@ -1347,8 +1356,9 @@ async function computeVelezTournamentFixture() {
 
   const matches = await Promise.all(
     sortedDesc.map(async (ev) => {
-      const code = ev.fixture?.status?.short || 'NS';
+      const code = String(ev.fixture?.status?.short || 'NS');
       const status = finishedCodes.includes(code) ? 'FINISHED' : (liveCodes.includes(code) ? 'LIVE' : 'UPCOMING');
+      const tentativeDate = status === 'UPCOMING' && code === 'TBD';
       const homeTeam = ev.teams?.home || {};
       const awayTeam = ev.teams?.away || {};
       const homeId = Number(homeTeam.id || 0);
@@ -1399,6 +1409,8 @@ async function computeVelezTournamentFixture() {
         id: String(ev.fixture?.id || ''),
         leagueId: Number(ev.league?.id || LIGA_ARG_ID),
         status,
+        apiStatusShort: code,
+        tentativeDate,
         isoDate: d.toISOString(),
         timestamp: d.getTime(),
         round: cleanRoundLabel(ev.league?.round || 'Fecha'),
