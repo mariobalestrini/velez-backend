@@ -8,6 +8,8 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_FOOTBALL_KEY;
 const BASE_URL = 'https://v3.football.api-sports.io';
+const TENTATIVE_MATCHES_URL =
+  process.env.TENTATIVE_MATCHES_URL || 'https://www.lavazulada.com/api/partidos-tentativos';
 
 const VELEZ_ID = 438;
 const LIGA_ARG_ID = 128;
@@ -22,6 +24,9 @@ let inflightRequest = null;
 let fixtureCacheData = null;
 let fixtureCacheTime = 0;
 let inflightFixtureRequest = null;
+
+let tentativeIdsCache = new Set();
+let tentativeIdsCacheTime = 0;
 
 const statsCacheByFixture = new Map();
 const eventsCacheByFixture = new Map();
@@ -211,6 +216,45 @@ function extractPlayerTechStats(playerEntry = {}) {
     passAccuracy: Number.isNaN(accuracyNum) ? 0 : Math.round(accuracyNum),
     tacklesTotal: Number(tackles.total || 0)
   };
+}
+
+async function fetchTentativeFixtureIds() {
+  const now = Date.now();
+  const ttl = 60 * 1000;
+  if (now - tentativeIdsCacheTime < ttl && tentativeIdsCache instanceof Set) {
+    return tentativeIdsCache;
+  }
+
+  if (!TENTATIVE_MATCHES_URL) {
+    return tentativeIdsCache;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+  try {
+    const res = await fetch(TENTATIVE_MATCHES_URL, { signal: controller.signal });
+    if (!res.ok) {
+      return tentativeIdsCache;
+    }
+    const rows = await res.json();
+    const nextSet = new Set();
+    if (Array.isArray(rows)) {
+      rows.forEach((item) => {
+        const rawId = item?.fixture_id ?? item?.fixtureId ?? item;
+        if (rawId !== undefined && rawId !== null && String(rawId).trim() !== '') {
+          nextSet.add(String(rawId).trim());
+        }
+      });
+    }
+    tentativeIdsCache = nextSet;
+    tentativeIdsCacheTime = now;
+    return nextSet;
+  } catch (err) {
+    return tentativeIdsCache;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function apiFootballGet(path, params = {}) {
@@ -1035,11 +1079,12 @@ async function computeClausuraSquadStats(baseSquad, finishedMatches, activeTourn
 async function computeVelezPayload(nowMs = Date.now()) {
   const season = getCurrentSeasonYear(nowMs);
 
-  const [fixtures, allLeagueFixtures, standingsResp, baseSquad] = await Promise.all([
+  const [fixtures, allLeagueFixtures, standingsResp, baseSquad, tentativeIds] = await Promise.all([
     fetchVelezAllCompetitionsFixtures(season),
     apiFootballGet('/fixtures', { league: LIGA_ARG_ID, season }),
     apiFootballGet('/standings', { league: LIGA_ARG_ID, season }),
-    fetchCurrentSquad(season)
+    fetchCurrentSquad(season),
+    fetchTentativeFixtureIds()
   ]);
 
   const activeTournamentName = detectActiveTournamentName(fixtures, standingsResp);
@@ -1069,8 +1114,9 @@ async function computeVelezPayload(nowMs = Date.now()) {
     const rivalTeam = isHome ? ev.teams?.away : ev.teams?.home;
     const d = new Date(ev.fixture?.date);
     const rawCode = String(ev.fixture?.status?.short || 'NS');
-    const isTbd = rawCode === 'TBD';
+    const isTbd = rawCode === 'TBD' || tentativeIds.has(String(ev.fixture?.id || '').trim());
     return {
+      id: String(ev.fixture?.id || ''),
       leagueId: Number(ev.league?.id || LIGA_ARG_ID),
       fecha: cleanRoundLabel(ev.league?.round || 'PRÓXIMO'),
       comp: getCompetitionDisplayName(ev.league),
@@ -1102,7 +1148,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
     const isLive = Boolean(liveMatchRaw && Number(targetEv.fixture?.id) === Number(liveMatchRaw.fixture?.id));
     const isFinishedTarget = finishedCodes.includes(targetEv.fixture?.status?.short);
     const statusShortRaw = String(targetEv.fixture?.status?.short || '');
-    const isTargetTbd = !isLive && !isFinishedTarget && statusShortRaw === 'TBD';
+    const isTargetTbd = !isLive && !isFinishedTarget && (statusShortRaw === 'TBD' || tentativeIds.has(String(targetEv.fixture?.id || '').trim()));
     const homeTeam = targetEv.teams?.home || {};
     const awayTeam = targetEv.teams?.away || {};
     const homeId = Number(homeTeam.id || 0);
@@ -1346,7 +1392,11 @@ async function computeVelezPayload(nowMs = Date.now()) {
 
 async function computeVelezTournamentFixture() {
   const season = getCurrentSeasonYear(Date.now());
-  const fixtures = await fetchVelezAllCompetitionsFixtures(season);
+  const [fixtures, tentativeIds] = await Promise.all([
+    fetchVelezAllCompetitionsFixtures(season),
+    fetchTentativeFixtureIds()
+  ]);
+
   const sortedDesc = [...fixtures].sort(
     (a, b) => new Date(b.fixture?.date || 0).getTime() - new Date(a.fixture?.date || 0).getTime()
   );
@@ -1358,7 +1408,8 @@ async function computeVelezTournamentFixture() {
     sortedDesc.map(async (ev) => {
       const code = String(ev.fixture?.status?.short || 'NS');
       const status = finishedCodes.includes(code) ? 'FINISHED' : (liveCodes.includes(code) ? 'LIVE' : 'UPCOMING');
-      const tentativeDate = status === 'UPCOMING' && code === 'TBD';
+      const fixtureIdStr = String(ev.fixture?.id || '').trim();
+      const tentativeDate = status === 'UPCOMING' && (code === 'TBD' || tentativeIds.has(fixtureIdStr));
       const homeTeam = ev.teams?.home || {};
       const awayTeam = ev.teams?.away || {};
       const homeId = Number(homeTeam.id || 0);
@@ -1406,7 +1457,7 @@ async function computeVelezTournamentFixture() {
       }
 
       return {
-        id: String(ev.fixture?.id || ''),
+        id: fixtureIdStr,
         leagueId: Number(ev.league?.id || LIGA_ARG_ID),
         status,
         apiStatusShort: code,
