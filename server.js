@@ -626,6 +626,63 @@ function formatPastMatchApiFootball(ev, targetTeamId = VELEZ_ID) {
   };
 }
 
+async function fetchRivalLast2Matches(rivalId, season, allLeagueFixtures = []) {
+  const rId = Number(rivalId || 0);
+  if (!rId || rId === VELEZ_ID) return [];
+
+  const finishedCodes = ['FT', 'AET', 'PEN'];
+  const byId = new Map();
+
+  const addMatches = (list = [], fallbackLeagueId = LIGA_ARG_ID) => {
+    (list || []).forEach(ev => {
+      const hId = Number(ev.teams?.home?.id || 0);
+      const aId = Number(ev.teams?.away?.id || 0);
+      if (hId !== rId && aId !== rId) return;
+      if (!finishedCodes.includes(ev.fixture?.status?.short)) return;
+
+      const enriched = {
+        ...ev,
+        teams: {
+          home: { ...(ev.teams?.home || {}), name: formatVelezName(ev.teams?.home?.name || 'Local') },
+          away: { ...(ev.teams?.away || {}), name: formatVelezName(ev.teams?.away?.name || 'Visitante') }
+        },
+        league: {
+          ...(ev.league || {}),
+          id: Number(ev.league?.id || fallbackLeagueId),
+          name: getCompetitionDisplayName({
+            id: ev.league?.id || fallbackLeagueId,
+            name: ev.league?.name
+          })
+        }
+      };
+
+      const key = String(ev.fixture?.id || `${fallbackLeagueId}-${ev.fixture?.date}`);
+      byId.set(key, enriched);
+    });
+  };
+
+  addMatches(allLeagueFixtures, LIGA_ARG_ID);
+
+  try {
+    const compResults = await Promise.allSettled(
+      COMP_IDS.map(leagueId => apiFootballGet('/fixtures', { team: rId, league: leagueId, season }))
+    );
+    compResults.forEach((res, idx) => {
+      if (res.status === 'fulfilled' && Array.isArray(res.value)) {
+        addMatches(res.value, COMP_IDS[idx]);
+      }
+    });
+  } catch (err) {
+    // Continuar con los partidos ya cargados en allLeagueFixtures
+  }
+
+  const sortedDesc = Array.from(byId.values()).sort(
+    (a, b) => new Date(b.fixture?.date || 0).getTime() - new Date(a.fixture?.date || 0).getTime()
+  );
+
+  return sortedDesc.slice(0, 2).map(ev => formatPastMatchApiFootball(ev, rId));
+}
+
 function buildAnnualStandingsFromLeagueFixtures(allLeagueFixtures = [], targetTeamId = VELEZ_ID) {
   const finishedStatuses = ['FT', 'AET', 'PEN'];
   const regularYearMatches = (allLeagueFixtures || []).filter(f =>
@@ -1035,6 +1092,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
 
   let currentMatch = null;
   let lastMatchStats = null;
+  let rivalLast2 = [];
 
   if (targetEv) {
     const isLive = Boolean(liveMatchRaw && Number(targetEv.fixture?.id) === Number(liveMatchRaw.fixture?.id));
@@ -1046,9 +1104,14 @@ async function computeVelezPayload(nowMs = Date.now()) {
     const homeNameStr = formatVelezName(homeTeam.name || 'Local');
     const awayNameStr = formatVelezName(awayTeam.name || 'Visitante');
     const rivalTeam = homeId === VELEZ_ID ? awayTeam : homeTeam;
+    const rivalId = Number(rivalTeam?.id || 0);
     const matchDateObj = new Date(targetEv.fixture?.date);
     const timestampMs = matchDateObj.getTime();
     const isoDateStrict = matchDateObj.toISOString();
+
+    if (rivalId && rivalId !== VELEZ_ID) {
+      rivalLast2 = await fetchRivalLast2Matches(rivalId, season, allLeagueFixtures);
+    }
 
     let scorers = { home: [], away: [] };
     let cards = { home: { yellow: [], red: [] }, away: { yellow: [], red: [] } };
@@ -1128,9 +1191,9 @@ async function computeVelezPayload(nowMs = Date.now()) {
       isoDate: isoDateStrict,
       penalties: targetEv.score?.penalty || null,
       velezForm: velezLast2,
-      rivalForm: [],
+      rivalForm: rivalLast2,
       velezLastMatches: velezLast2,
-      rivalLastMatches: [],
+      rivalLastMatches: rivalLast2,
       match: {
         teams: {
           home: { id: homeId, name: homeNameStr, logo: homeTeam.logo || '' },
@@ -1257,8 +1320,8 @@ async function computeVelezPayload(nowMs = Date.now()) {
     currentMatch,
     lastMatches,
     velezLast2,
-    rivalLastMatches: [],
-    rivalLast2: [],
+    rivalLastMatches: rivalLast2,
+    rivalLast2,
     upcomingMatches,
     squad,
     clausuraSquad: squad,
