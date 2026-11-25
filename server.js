@@ -31,6 +31,7 @@ let tentativeIdsCacheTime = 0;
 const statsCacheByFixture = new Map();
 const eventsCacheByFixture = new Map();
 const lineupsCacheByFixture = new Map();
+const playersStatsCacheByFixture = new Map();
 
 function getCurrentSeasonYear(nowMs = Date.now()) {
   if (process.env.SEASON) {
@@ -462,6 +463,45 @@ async function getFixtureLineupsCached(fixtureId) {
   const data = await apiFootballGet('/fixtures/lineups', { fixture: fixtureId });
   lineupsCacheByFixture.set(key, { data, ts: Date.now() });
   return data;
+}
+
+async function getFixturePlayersStatsCached(fixtureId, isLive = false) {
+  const key = String(fixtureId);
+  const cached = playersStatsCacheByFixture.get(key);
+  const maxAge = isLive ? 20 * 1000 : 24 * 60 * 60 * 1000;
+  if (cached && (Date.now() - cached.ts < maxAge)) {
+    return cached.data;
+  }
+  const data = await apiFootballGet('/fixtures/players', { fixture: fixtureId });
+  playersStatsCacheByFixture.set(key, { data, ts: Date.now() });
+  return data;
+}
+
+function parseVelezPlayersStats(playersResp = []) {
+  const velezBlock = (playersResp || []).find(b => Number(b.team?.id) === VELEZ_ID);
+  if (!velezBlock || !Array.isArray(velezBlock.players)) return [];
+
+  return velezBlock.players.map(entry => {
+    const pl = entry.player || {};
+    const st = (Array.isArray(entry.statistics) && entry.statistics[0]) || {};
+    const accRaw = st.passes?.accuracy;
+    const accNum = (accRaw !== null && accRaw !== undefined && String(accRaw).trim() !== '')
+      ? Number(String(accRaw).replace('%', '').trim())
+      : null;
+
+    return {
+      id: Number(pl.id || 0),
+      name: pl.name || 'Jugador',
+      passAccuracy: accNum !== null && !Number.isNaN(accNum) ? Math.round(accNum) : null,
+      assists: Number(st.goals?.assists ?? 0) || 0,
+      shotsOnTarget: Number(st.shots?.on ?? 0) || 0,
+      goals: Number(st.goals?.total ?? 0) || 0,
+      foulsDrawn: Number(st.fouls?.drawn ?? 0) || 0,
+      foulsCommitted: Number(st.fouls?.committed ?? 0) || 0,
+      yellowCards: Number(st.cards?.yellow ?? 0) || 0,
+      redCards: Number(st.cards?.red ?? 0) || 0
+    };
+  });
 }
 
 function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId, homeTeamName = 'Local', awayTeamName = 'Visitante') {
@@ -1326,7 +1366,10 @@ async function computeVelezPayload(nowMs = Date.now()) {
   const lineupsTargetEvents = [...finishedMatches].reverse().slice(0, 3);
   for (const ev of lineupsTargetEvents) {
     try {
-      const lResp = await getFixtureLineupsCached(ev.fixture.id);
+      const [lResp, pResp] = await Promise.all([
+        getFixtureLineupsCached(ev.fixture.id),
+        getFixturePlayersStatsCached(ev.fixture.id, false).catch(() => [])
+      ]);
       const velezLineup = (lResp || []).find(item => Number(item.team?.id) === VELEZ_ID);
       if (velezLineup && Array.isArray(velezLineup.startXI) && velezLineup.startXI.length >= 11) {
         const parsed = formatPastMatchApiFootball(ev, VELEZ_ID);
@@ -1338,6 +1381,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
           score: parsed.score,
           cond: parsed.cond,
           comp: parsed.comp,
+          playerStats: parseVelezPlayersStats(pResp),
           starters: velezLineup.startXI.slice(0, 11).map(entry => {
             const pl = entry.player || {};
             const posInfo = mapPosition('', pl.pos);
