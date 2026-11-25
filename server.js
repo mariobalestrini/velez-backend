@@ -1497,6 +1497,36 @@ async function computeVelezTournamentFixture() {
   };
 }
 
+function refreshVelezDataInBackground() {
+  if (inflightRequest) return inflightRequest;
+  inflightRequest = (async () => {
+    try {
+      const payload = await computeVelezPayload(Date.now());
+      cacheData = payload;
+      cacheTime = Date.now();
+      return payload;
+    } finally {
+      inflightRequest = null;
+    }
+  })();
+  return inflightRequest;
+}
+
+function refreshFixtureInBackground() {
+  if (inflightFixtureRequest) return inflightFixtureRequest;
+  inflightFixtureRequest = (async () => {
+    try {
+      const payload = await computeVelezTournamentFixture();
+      fixtureCacheData = payload;
+      fixtureCacheTime = Date.now();
+      return payload;
+    } finally {
+      inflightFixtureRequest = null;
+    }
+  })();
+  return inflightFixtureRequest;
+}
+
 app.get('/', (req, res) => {
   res.json({
     status: 'OK',
@@ -1510,39 +1540,23 @@ app.get('/api/velez-data', async (req, res) => {
   const isLiveCached = cacheData?.currentMatch?.type === 'LIVE';
   const ttl = isLiveCached ? 20 * 1000 : 15 * 60 * 1000;
 
-  if (cacheData && (now - cacheTime < ttl)) {
+  if (cacheData) {
+    if (now - cacheTime >= ttl) {
+      refreshVelezDataInBackground().catch(err =>
+        console.warn('Error refrescando velez-data en background:', err.message)
+      );
+    }
     return res.json(cacheData);
   }
 
-  if (inflightRequest) {
-    try {
-      const sharedData = await inflightRequest;
-      return res.json(sharedData);
-    } catch (err) {
-      if (cacheData) return res.json(cacheData);
-    }
-  }
-
-  inflightRequest = (async () => {
-    const payload = await computeVelezPayload(Date.now());
-    cacheData = payload;
-    cacheTime = Date.now();
-    return payload;
-  })();
-
   try {
-    const data = await inflightRequest;
+    const data = await refreshVelezDataInBackground();
     res.json(data);
   } catch (error) {
-    if (cacheData) {
-      return res.json(cacheData);
-    }
     res.status(500).json({
       error: 'Fallo al procesar datos de API-Football',
       mensaje: error.message
     });
-  } finally {
-    inflightRequest = null;
   }
 });
 
@@ -1550,37 +1564,25 @@ app.get('/api/velez-fixture', async (req, res) => {
   const now = Date.now();
   const ttl = 15 * 60 * 1000;
 
-  if (fixtureCacheData && (now - fixtureCacheTime < ttl)) {
+  if (fixtureCacheData) {
+    if (now - fixtureCacheTime >= ttl) {
+      refreshFixtureInBackground().catch(err =>
+        console.warn('Error refrescando velez-fixture en background:', err.message)
+      );
+    }
     return res.json(fixtureCacheData);
   }
 
-  if (inflightFixtureRequest) {
-    try {
-      const shared = await inflightFixtureRequest;
-      return res.json(shared);
-    } catch (err) {
-      if (fixtureCacheData) return res.json(fixtureCacheData);
-    }
-  }
-
-  inflightFixtureRequest = (async () => {
-    const payload = await computeVelezTournamentFixture();
-    fixtureCacheData = payload;
-    fixtureCacheTime = Date.now();
-    return payload;
-  })();
-
   try {
-    const data = await inflightFixtureRequest;
+    const data = await refreshFixtureInBackground();
     res.json(data);
   } catch (error) {
-    if (fixtureCacheData) return res.json(fixtureCacheData);
     res.status(500).json({ error: 'Error obteniendo fixture', mensaje: error.message });
-  } finally {
-    inflightFixtureRequest = null;
   }
 });
 
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en puerto ${PORT} (temporada ${getCurrentSeasonYear(Date.now())})`);
+  refreshVelezDataInBackground().catch(err => console.warn('Warmup velez-data:', err.message));
+  refreshFixtureInBackground().catch(err => console.warn('Warmup velez-fixture:', err.message));
 });
