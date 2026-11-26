@@ -1,3 +1,6 @@
+/* ============================================================================
+ * 1. CONFIGURACIÓN GENERAL, CONSTANTES Y CACHÉS EN MEMORIA
+ * ============================================================================ */
 const express = require('express');
 const cors = require('cors');
 
@@ -11,12 +14,14 @@ const BASE_URL = 'https://v3.football.api-sports.io';
 const TENTATIVE_MATCHES_URL =
   process.env.TENTATIVE_MATCHES_URL || 'https://www.lavazulada.com/api/partidos-tentativos';
 
+// IDs oficiales en API-Football
 const VELEZ_ID = 438;
 const LIGA_ARG_ID = 128;
 const COPA_ARG_ID = 130;
 const SUDAMERICANA_ID = 11;
 const COMP_IDS = [LIGA_ARG_ID, COPA_ARG_ID, SUDAMERICANA_ID];
 
+// Cachés principales de endpoints
 let cacheData = null;
 let cacheTime = 0;
 let inflightRequest = null;
@@ -28,11 +33,15 @@ let inflightFixtureRequest = null;
 let tentativeIdsCache = new Set();
 let tentativeIdsCacheTime = 0;
 
+// Cachés por partido (24 hs para partidos terminados, 20 seg en vivo)
 const statsCacheByFixture = new Map();
 const eventsCacheByFixture = new Map();
 const lineupsCacheByFixture = new Map();
 const playersStatsCacheByFixture = new Map();
 
+/* ============================================================================
+ * 2. FUNCIONES AUXILIARES (FECHAS, TEXTOS, TRADUCCIONES Y POSICIONES)
+ * ============================================================================ */
 function getCurrentSeasonYear(nowMs = Date.now()) {
   if (process.env.SEASON) {
     const envSeason = Number(process.env.SEASON);
@@ -219,6 +228,9 @@ function extractPlayerTechStats(playerEntry = {}) {
   };
 }
 
+/* ============================================================================
+ * 3. CONEXIÓN CON MYSQL (PARTIDOS "A CONFIRMAR") Y API-FOOTBALL
+ * ============================================================================ */
 async function fetchTentativeFixtureIds() {
   const now = Date.now();
   const ttl = 60 * 1000;
@@ -330,6 +342,9 @@ async function fetchVelezAllCompetitionsFixtures(season) {
   return Array.from(byId.values());
 }
 
+/* ============================================================================
+ * 4. ESTADÍSTICAS, EVENTOS, FORMACIONES Y RENDIMIENTO POR JUGADOR
+ * ============================================================================ */
 function getStatValue(statsList = [], typeName) {
   const found = (statsList || []).find(s => s.type === typeName);
   if (!found || found.value === null || found.value === undefined) return null;
@@ -430,6 +445,7 @@ function parseMatchLineupsForView(lineupsResp = [], homeId, awayId) {
   };
 }
 
+// Consultas cacheadas por partido (24 hs para historial, 20 seg en vivo)
 async function getFixtureStatisticsCached(fixtureId, isLive = false) {
   const key = String(fixtureId);
   const cached = statsCacheByFixture.get(key);
@@ -477,6 +493,7 @@ async function getFixturePlayersStatsCached(fixtureId, isLive = false) {
   return data;
 }
 
+// Estadísticas individuales de Vélez por partido (con cálculo real de % de pases)
 function parseVelezPlayersStats(playersResp = []) {
   const velezBlock = (playersResp || []).find(b => Number(b.team?.id) === VELEZ_ID);
   if (!velezBlock || !Array.isArray(velezBlock.players)) return [];
@@ -484,15 +501,30 @@ function parseVelezPlayersStats(playersResp = []) {
   return velezBlock.players.map(entry => {
     const pl = entry.player || {};
     const st = (Array.isArray(entry.statistics) && entry.statistics[0]) || {};
+
+    const totalPasses = Number(st.passes?.total ?? 0) || 0;
     const accRaw = st.passes?.accuracy;
-    const accNum = (accRaw !== null && accRaw !== undefined && String(accRaw).trim() !== '')
-      ? Number(String(accRaw).replace('%', '').trim())
-      : null;
+    let passAccuracy = null;
+
+    if (accRaw !== null && accRaw !== undefined && String(accRaw).trim() !== '') {
+      const strVal = String(accRaw).trim();
+      const numVal = Number(strVal.replace('%', '').trim());
+      if (!Number.isNaN(numVal)) {
+        if (strVal.includes('%')) {
+          passAccuracy = Math.round(numVal);
+        } else if (totalPasses > 0 && numVal <= totalPasses) {
+          passAccuracy = Math.round((numVal / totalPasses) * 100);
+        } else if (numVal <= 100) {
+          passAccuracy = Math.round(numVal);
+        }
+      }
+    }
 
     return {
       id: Number(pl.id || 0),
       name: pl.name || 'Jugador',
-      passAccuracy: accNum !== null && !Number.isNaN(accNum) ? Math.round(accNum) : null,
+      passesTotal: totalPasses,
+      passAccuracy,
       assists: Number(st.goals?.assists ?? 0) || 0,
       shotsOnTarget: Number(st.shots?.on ?? 0) || 0,
       goals: Number(st.goals?.total ?? 0) || 0,
@@ -680,6 +712,9 @@ function parseEventsIntoScorersAndCards(eventsList = [], homeTeamId, awayTeamId,
   return { scorers, cards, substitutions, penaltyShootout, timeline };
 }
 
+/* ============================================================================
+ * 5. PARTIDOS PASADOS, RIVAL Y TABLAS DE POSICIONES
+ * ============================================================================ */
 function formatPastMatchApiFootball(ev, targetTeamId = VELEZ_ID) {
   const isHome = Number(ev.teams?.home?.id) === Number(targetTeamId);
   const oppTeam = isHome ? ev.teams?.away : ev.teams?.home;
@@ -932,6 +967,9 @@ function detectActiveTournamentName(fixtures = [], standingsResp = []) {
   return translateSpanishLabels(standingsResp[0]?.league?.name || 'Liga Profesional');
 }
 
+/* ============================================================================
+ * 6. PLANTEL OFICIAL Y ESTADÍSTICAS DEL TORNEO VIGENTE
+ * ============================================================================ */
 async function fetchCurrentSquad(season) {
   const metaById = new Map();
 
@@ -1116,6 +1154,9 @@ async function computeClausuraSquadStats(baseSquad, finishedMatches, activeTourn
   }));
 }
 
+/* ============================================================================
+ * 7. ARMADO DEL PAYLOAD PRINCIPAL (/api/velez-data)
+ * ============================================================================ */
 async function computeVelezPayload(nowMs = Date.now()) {
   const season = getCurrentSeasonYear(nowMs);
 
@@ -1149,6 +1190,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
   const lastMatches = [...finishedMatches].reverse().slice(0, 5).map(ev => formatPastMatchApiFootball(ev, VELEZ_ID));
   const velezLast2 = lastMatches.slice(0, 2);
 
+  // Próximos 4 partidos de Vélez
   const upcomingMatches = upcomingRaw.slice(0, 4).map(ev => {
     const isHome = Number(ev.teams?.home?.id) === VELEZ_ID;
     const rivalTeam = isHome ? ev.teams?.away : ev.teams?.home;
@@ -1173,6 +1215,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
     };
   });
 
+  // Selección del partido principal (En Vivo / Post-partido 26 hs / Próximo)
   const hoursSinceLastMatch = lastFinishedRaw
     ? (nowMs - new Date(lastFinishedRaw.fixture?.date || 0).getTime()) / (1000 * 60 * 60)
     : Infinity;
@@ -1362,6 +1405,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
     };
   }
 
+  // --- PIZARRA TÁCTICA: ÚLTIMOS 5 PARTIDOS COMPLETOS (FORMACIONES, CAMBIOS Y STATS) ---
   const recentLineups = [];
   const lineupsTargetEvents = [...finishedMatches].reverse().slice(0, 5);
   for (const ev of lineupsTargetEvents) {
@@ -1465,6 +1509,9 @@ async function computeVelezPayload(nowMs = Date.now()) {
   };
 }
 
+/* ============================================================================
+ * 8. ARMADO DEL FIXTURE COMPLETO (/api/velez-fixture)
+ * ============================================================================ */
 async function computeVelezTournamentFixture() {
   const season = getCurrentSeasonYear(Date.now());
   const [fixtures, tentativeIds] = await Promise.all([
@@ -1572,6 +1619,9 @@ async function computeVelezTournamentFixture() {
   };
 }
 
+/* ============================================================================
+ * 9. REFRESCO EN SEGUNDO PLANO Y ENDPOINTS HTTP
+ * ============================================================================ */
 function refreshVelezDataInBackground() {
   if (inflightRequest) return inflightRequest;
   inflightRequest = (async () => {
@@ -1602,6 +1652,7 @@ function refreshFixtureInBackground() {
   return inflightFixtureRequest;
 }
 
+// Health check
 app.get('/', (req, res) => {
   res.json({
     status: 'OK',
@@ -1610,6 +1661,7 @@ app.get('/', (req, res) => {
   });
 });
 
+// Datos principales del sitio (caché 15 min normal / 20 seg en vivo)
 app.get('/api/velez-data', async (req, res) => {
   const now = Date.now();
   const isLiveCached = cacheData?.currentMatch?.type === 'LIVE';
@@ -1635,6 +1687,7 @@ app.get('/api/velez-data', async (req, res) => {
   }
 });
 
+// Fixture completo de la temporada (caché 15 min)
 app.get('/api/velez-fixture', async (req, res) => {
   const now = Date.now();
   const ttl = 15 * 60 * 1000;
@@ -1656,6 +1709,7 @@ app.get('/api/velez-fixture', async (req, res) => {
   }
 });
 
+// Refresco forzado desde el Panel Admin (invalida cachés al instante)
 app.post('/api/refresh-cache', async (req, res) => {
   try {
     tentativeIdsCacheTime = 0;
@@ -1673,6 +1727,7 @@ app.post('/api/refresh-cache', async (req, res) => {
   }
 });
 
+// Arranque del servidor + precarga inicial
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en puerto ${PORT} (temporada ${getCurrentSeasonYear(Date.now())})`);
   refreshVelezDataInBackground().catch(err => console.warn('Warmup velez-data:', err.message));
