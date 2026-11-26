@@ -1363,7 +1363,7 @@ async function computeVelezPayload(nowMs = Date.now()) {
   }
 
   const recentLineups = [];
-  const lineupsTargetEvents = [...finishedMatches].reverse().slice(0, 3);
+  const lineupsTargetEvents = [...finishedMatches].reverse().slice(0, 5);
   for (const ev of lineupsTargetEvents) {
     try {
       const homeId = Number(ev.teams?.home?.id || 0);
