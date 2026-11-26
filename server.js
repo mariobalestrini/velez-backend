@@ -1366,13 +1366,35 @@ async function computeVelezPayload(nowMs = Date.now()) {
   const lineupsTargetEvents = [...finishedMatches].reverse().slice(0, 3);
   for (const ev of lineupsTargetEvents) {
     try {
-      const [lResp, pResp] = await Promise.all([
+      const homeId = Number(ev.teams?.home?.id || 0);
+      const awayId = Number(ev.teams?.away?.id || 0);
+      const homeNameStr = formatVelezName(ev.teams?.home?.name || 'Local');
+      const awayNameStr = formatVelezName(ev.teams?.away?.name || 'Visitante');
+      const isVelezHome = homeId === VELEZ_ID;
+
+      const [lResp, pResp, evList, statsList] = await Promise.all([
         getFixtureLineupsCached(ev.fixture.id),
-        getFixturePlayersStatsCached(ev.fixture.id, false).catch(() => [])
+        getFixturePlayersStatsCached(ev.fixture.id, false).catch(() => []),
+        getFixtureEventsCached(ev.fixture.id, false).catch(() => []),
+        getFixtureStatisticsCached(ev.fixture.id, false).catch(() => [])
       ]);
+
       const velezLineup = (lResp || []).find(item => Number(item.team?.id) === VELEZ_ID);
       if (velezLineup && Array.isArray(velezLineup.startXI) && velezLineup.startXI.length >= 11) {
         const parsed = formatPastMatchApiFootball(ev, VELEZ_ID);
+        const parsedEv = parseEventsIntoScorersAndCards(evList, homeId, awayId, homeNameStr, awayNameStr);
+        const velezSide = isVelezHome ? 'home' : 'away';
+
+        const velezBlock = (statsList || []).find(b => Number(b.team?.id) === VELEZ_ID);
+        const rivalBlock = (statsList || []).find(b => Number(b.team?.id) !== VELEZ_ID);
+        const vStats = velezBlock?.statistics || [];
+        const rStats = rivalBlock?.statistics || [];
+        const possVelez = getStatValue(vStats, 'Ball Possession');
+        const possRival = getStatValue(rStats, 'Ball Possession');
+        const shotsOnTarget = getStatValue(vStats, 'Shots on Goal');
+        const shotsOffTarget = getStatValue(vStats, 'Shots off Goal');
+        const totalShots = getStatValue(vStats, 'Total Shots') ?? (shotsOnTarget !== null && shotsOffTarget !== null ? shotsOnTarget + shotsOffTarget : null);
+
         recentLineups.push({
           eventId: String(ev.fixture.id),
           formation: velezLineup.formation || '4-2-3-1',
@@ -1381,6 +1403,15 @@ async function computeVelezPayload(nowMs = Date.now()) {
           score: parsed.score,
           cond: parsed.cond,
           comp: parsed.comp,
+          possession: possVelez !== null ? Math.round(possVelez) : null,
+          oppPossession: possRival !== null ? Math.round(possRival) : null,
+          totalShots,
+          shotsOnTarget,
+          substitutions: parsedEv.substitutions[velezSide] || [],
+          cards: [
+            ...(parsedEv.cards[velezSide]?.yellow || []).map(c => ({ player: c, type: 'yellow' })),
+            ...(parsedEv.cards[velezSide]?.red || []).map(c => ({ player: c, type: 'red' }))
+          ],
           playerStats: parseVelezPlayersStats(pResp),
           starters: velezLineup.startXI.slice(0, 11).map(entry => {
             const pl = entry.player || {};
