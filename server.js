@@ -1625,6 +1625,23 @@ app.get('/api/velez-fixture', async (req, res) => {
   }
 });
 
+app.post('/api/refresh-cache', async (req, res) => {
+  try {
+    tentativeIdsCacheTime = 0;
+    cacheTime = 0;
+    fixtureCacheTime = 0;
+
+    await Promise.all([
+      refreshVelezDataInBackground(),
+      refreshFixtureInBackground()
+    ]);
+
+    res.json({ ok: true, refreshedAt: new Date().toISOString() });
+  } catch (error) {
+    res.status(500).json({ error: 'Error refrescando caché', mensaje: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en puerto ${PORT} (temporada ${getCurrentSeasonYear(Date.now())})`);
   refreshVelezDataInBackground().catch(err => console.warn('Warmup velez-data:', err.message));
