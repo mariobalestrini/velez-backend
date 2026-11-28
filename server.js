@@ -493,7 +493,7 @@ async function getFixturePlayersStatsCached(fixtureId, isLive = false) {
   return data;
 }
 
-// Estadísticas individuales de Vélez por partido (con cálculo real de % de pases)
+// Estadísticas individuales de Vélez por partido (puntaje + cálculo real de % de pases)
 function parseVelezPlayersStats(playersResp = []) {
   const velezBlock = (playersResp || []).find(b => Number(b.team?.id) === VELEZ_ID);
   if (!velezBlock || !Array.isArray(velezBlock.players)) return [];
@@ -520,9 +520,18 @@ function parseVelezPlayersStats(playersResp = []) {
       }
     }
 
+    const ratingRaw = st.games?.rating;
+    const ratingParsed = (ratingRaw !== null && ratingRaw !== undefined && String(ratingRaw).trim() !== '')
+      ? parseFloat(String(ratingRaw).replace(',', '.').trim())
+      : null;
+    const rating = (ratingParsed !== null && !Number.isNaN(ratingParsed) && ratingParsed > 0)
+      ? Number(ratingParsed.toFixed(1))
+      : null;
+
     return {
       id: Number(pl.id || 0),
       name: pl.name || 'Jugador',
+      rating,
       passesTotal: totalPasses,
       passAccuracy,
       assists: Number(st.goals?.assists ?? 0) || 0,
